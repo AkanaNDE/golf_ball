@@ -17,6 +17,7 @@ import math
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from geometry_msgs.msg import TransformStamped, Vector3
 from nav_msgs.msg import Odometry
 from tf2_ros import TransformBroadcaster
@@ -49,7 +50,8 @@ class WheelOdometry(Node):
 
         self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
         self.tf_broadcaster = TransformBroadcaster(self) if self.publish_tf else None
-        self.create_subscription(Vector3, 'wheel_vel', self.on_wheel_vel, 10)
+        # ESP32 publishes wheel_vel best-effort: subscribe with a matching (sensor data) QoS
+        self.create_subscription(Vector3, 'wheel_vel', self.on_wheel_vel, qos_profile_sensor_data)
 
         self.x = 0.0
         self.y = 0.0
