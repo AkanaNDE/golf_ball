@@ -15,10 +15,10 @@
 // Encoders: 36GP-555 magnetic encoder on every motor (phase A / phase B)
 //
 //                 PWM  DIR  ENC_A  ENC_B  invert_motor  invert_encoder
-#define M1_CONFIG  16,  15,  13,    12,    false,        false
-#define M2_CONFIG  17,  18,  14,    27,    false,        true
-#define M3_CONFIG  19,  21,  26,    25,    false,        false
-#define M4_CONFIG  23,  22,  33,    32,    false,        true
+#define M1_CONFIG  16,  15,  13,    12,    true,         false
+#define M2_CONFIG  18,  17,  14,    27,    true,         true
+#define M3_CONFIG  21,  19,  26,    25,    true,         false
+#define M4_CONFIG  4,   5,   33,    32,    false,         true    // moved from GPIO23/22 (no signal at D2 ch2)
 //
 // invert_motor:   flip if the wheel spins backward when commanded forward
 // invert_encoder: flip if the count goes down while the wheel spins forward
