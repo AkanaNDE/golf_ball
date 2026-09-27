@@ -96,3 +96,17 @@ Afterwards upload the real firmware again (`-e esp32dev`).
 4. motor_test `m`: rad/s at 100% → `MAX_WHEEL_SPEED`; then tune `PID_KP` / `PID_KI`.
 5. Calibrate `TRACK_WIDTH` (skid steer): spin 360° in place, scale until `/odom` yaw matches.
    Copy the same `WHEEL_RADIUS` / `TRACK_WIDTH` into `config/golf_bot.yaml`.
+
+## Raspberry Pi 5 (Ubuntu 24.04 arm64)
+One-time setup (ROS 2 Jazzy, micro-ROS agent, build, serial permission, `~/.bashrc`):
+```bash
+git clone https://github.com/AkanaNDE/golf_ball.git ~/golf_ws
+bash ~/golf_ws/scripts/setup_pi.sh
+```
+Log out and back in, then `ros2 launch golf_bot_bringup bringup.launch.py serial_port:=/dev/ttyUSB0`.
+
+Update after pushing changes from the PC:
+```bash
+cd ~/golf_ws && git pull && colcon build --symlink-install
+```
+Flash the ESP32 from the PC (PlatformIO); the Pi only needs the USB cable to the ESP32.
