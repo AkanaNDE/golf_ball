@@ -1,0 +1,40 @@
+# Golf ball collector robot parameters
+#
+# Xbox controller indices for joy_node (USB / xpad driver):
+#   buttons: A=0 B=1 X=2 Y=3 LB=4 RB=5 Back=6 Start=7 Xbox=8 LS=9 RS=10
+#   axes:    LX=0 LY=1 LT=2 RX=3 RY=4 RT=5 DpadX=6 DpadY=7
+# Over Bluetooth (xpadneo) the layout can differ: check with `ros2 topic echo /joy`.
+
+joy_node:
+  ros__parameters:
+    device_id: 0
+    deadzone: 0.1
+    autorepeat_rate: 20.0   # keep publishing while held, so teleop can detect a lost joystick
+
+xbox_teleop:
+  ros__parameters:
+    axis_linear: 1          # left stick up/down
+    axis_angular: 3         # right stick left/right
+    scale_linear: 0.4       # m/s
+    scale_linear_turbo: 0.8 # m/s (hold RB)
+    scale_angular: 1.2      # rad/s
+    scale_angular_turbo: 2.0
+    button_deadman: 4       # LB: hold to drive
+    button_turbo: 5         # RB
+    button_estop: 1        # B
+    button_estop_release: 7 # Start
+    # Smooth speed ramp: how fast the command may change
+    accel_linear: 0.5       # m/s^2   speeding up   (0 -> 0.4 m/s in 0.8 s)
+    decel_linear: 1.0       # m/s^2   slowing down  (0.4 -> 0 m/s in 0.4 s)
+    accel_angular: 2.0      # rad/s^2
+    decel_angular: 4.0      # rad/s^2
+    joy_timeout: 0.5        # s
+    publish_rate: 20.0      # Hz
+
+wheel_odometry:
+  ros__parameters:
+    wheel_radius: 0.100     # m  100 mm (must match WHEEL_RADIUS in firmware config.h)
+    track_width: 0.510      # m  510 mm (must match TRACK_WIDTH in firmware config.h)
+    odom_frame: odom
+    base_frame: base_link
+    publish_tf: true
