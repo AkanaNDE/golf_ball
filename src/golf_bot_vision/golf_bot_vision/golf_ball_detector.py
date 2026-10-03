@@ -19,6 +19,7 @@ Model (parameter `model`):
 
 import glob
 import os
+import re
 import time
 
 import cv2
@@ -90,7 +91,11 @@ class GolfBallDetector(Node):
         else:
             candidates = [int(camera) if camera.isdigit() else camera]
         for dev in candidates:
-            cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
+            # Open by index: OpenCV 5's V4L2 backend can no longer open by path
+            index = dev
+            if isinstance(dev, str) and re.fullmatch(r'/dev/video\d+', dev):
+                index = int(dev[len('/dev/video'):])
+            cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
             if cap.isOpened():
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
