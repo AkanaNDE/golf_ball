@@ -16,3 +16,6 @@ __pycache__/
 .idea/
 *.swp
 .DS_Store
+
+# Exported YOLO models (build them on each machine)
+*_ncnn_model/

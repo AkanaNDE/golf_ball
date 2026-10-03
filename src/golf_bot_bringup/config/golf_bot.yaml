@@ -43,11 +43,12 @@ wheel_odometry:
 
 golf_ball_detector:
   ros__parameters:
+    model: auto             # NCNN folder if exported (Pi), else golf_ball_yolo11n.pt; or a full path
     camera: "0"             # "0" = /dev/video0, or a path like "/dev/video2"
     width: 640
     height: 480
     flip: false             # true if the camera is mounted upside down
-    imgsz: 640              # use 320 on Raspberry Pi 5 (about 4x faster)
+    imgsz: 0                # 0 = auto: 320 for NCNN, 640 for .pt
     confidence: 0.4
     max_rate: 15.0          # Hz
     publish_image: true     # /golf_ball/image for rqt_image_view

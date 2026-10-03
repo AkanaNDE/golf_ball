@@ -10,8 +10,11 @@ Publishes:
 "Nearest" = the box whose bottom edge is lowest in the image (closest to the robot
 for a forward-looking camera on flat ground).
 
-Model: the YOLO11n weights in models/ (.pt), or an exported NCNN folder
-(much faster on Raspberry Pi 5): yolo export model=golf_ball_yolo11n.pt format=ncnn imgsz=320
+Model (parameter `model`):
+  "auto"  (default) use models/golf_ball_yolo11n_ncnn_model if it exists (export it on the
+          Raspberry Pi, ~4x faster on ARM), otherwise models/golf_ball_yolo11n.pt
+  a path  to a .pt file or an NCNN model folder
+`imgsz` 0 = auto: 320 for NCNN (the size it was exported with), 640 for .pt
 """
 
 import os
@@ -31,15 +34,13 @@ class GolfBallDetector(Node):
     def __init__(self):
         super().__init__('golf_ball_detector')
 
-        default_model = os.path.join(
-            get_package_share_directory('golf_bot_vision'), 'models', 'golf_ball_yolo11n.pt')
         self.declare_parameters('', [
-            ('model', default_model),
+            ('model', 'auto'),
             ('camera', '0'),            # index ("0") or device path ("/dev/video0")
             ('width', 640),
             ('height', 480),
             ('flip', False),            # rotate 180 deg if the camera is mounted upside down
-            ('imgsz', 640),             # YOLO input size (320 is ~4x faster on a Pi)
+            ('imgsz', 0),               # YOLO input size, 0 = auto (320 NCNN / 640 .pt)
             ('confidence', 0.4),
             ('max_rate', 15.0),         # Hz, upper limit of the detection loop
             ('publish_image', True),
@@ -60,8 +61,10 @@ class GolfBallDetector(Node):
         except ImportError:
             self.get_logger().fatal('ultralytics not installed: pip install ultralytics')
             raise
-        model_path = p('model')
-        self.get_logger().info(f'Loading model {model_path}')
+        model_path = self.resolve_model(p('model'))
+        if self.imgsz <= 0:
+            self.imgsz = 320 if model_path.endswith('_ncnn_model') else 640
+        self.get_logger().info(f'Loading model {model_path} (imgsz {self.imgsz})')
         self.model = YOLO(model_path, task='detect')
 
         cam = p('camera')
@@ -81,6 +84,17 @@ class GolfBallDetector(Node):
         self.fps = 0.0
         self.last_time = time.monotonic()
         self.get_logger().info(f'Detecting golf balls from camera {cam}')
+
+    @staticmethod
+    def resolve_model(model):
+        if model != 'auto':
+            return model
+        pt = os.path.join(
+            get_package_share_directory('golf_bot_vision'), 'models', 'golf_ball_yolo11n.pt')
+        # With --symlink-install the installed .pt links back to src/.../models, where the
+        # NCNN folder is exported, so look next to the real file.
+        ncnn = os.path.join(os.path.dirname(os.path.realpath(pt)), 'golf_ball_yolo11n_ncnn_model')
+        return ncnn if os.path.isdir(ncnn) else pt
 
     def on_timer(self):
         ok, frame = self.cap.read()
