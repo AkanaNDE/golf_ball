@@ -6,6 +6,8 @@ Publishes:
                        y = bottom edge of the box, 0 (top of image) .. 1 (bottom = close)
                        z = detection confidence
   /golf_ball/image   sensor_msgs/Image (bgr8)    annotated image for debugging (rqt_image_view)
+  /golf_ball/image/compressed  sensor_msgs/CompressedImage (JPEG), light enough for WiFi:
+                     view it on another computer with `ros2 run golf_bot_vision image_viewer`
 
 "Nearest" = the box whose bottom edge is lowest in the image (closest to the robot
 for a forward-looking camera on flat ground).
@@ -28,7 +30,7 @@ from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import PointStamped
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage, Image
 
 
 class GolfBallDetector(Node):
@@ -47,6 +49,7 @@ class GolfBallDetector(Node):
             ('max_rate', 15.0),         # Hz, upper limit of the detection loop
             ('publish_image', True),
             ('image_every_n', 3),       # publish every Nth annotated frame
+            ('jpeg_quality', 60),       # /golf_ball/image/compressed quality (0-100)
             ('show_window', False),     # cv2 window (desktop only)
         ])
         p = lambda name: self.get_parameter(name).value  # noqa: E731
@@ -56,6 +59,7 @@ class GolfBallDetector(Node):
         self.publish_image = p('publish_image')
         self.image_every_n = max(1, p('image_every_n'))
         self.show_window = p('show_window')
+        self.jpeg_quality = int(p('jpeg_quality'))
 
         # Import here so the node starts with a clear error if ultralytics is missing
         try:
@@ -73,6 +77,7 @@ class GolfBallDetector(Node):
 
         self.target_pub = self.create_publisher(PointStamped, 'golf_ball/target', 10)
         self.image_pub = self.create_publisher(Image, 'golf_ball/image', 2)
+        self.jpeg_pub = self.create_publisher(CompressedImage, 'golf_ball/image/compressed', 2)
         self.create_timer(1.0 / p('max_rate'), self.on_timer)
 
         self.frame_count = 0
@@ -158,7 +163,18 @@ class GolfBallDetector(Node):
         if want_image or self.show_window:
             img = self.annotate(frame, boxes, confs, target)
             if want_image:
-                self.image_pub.publish(self.to_image_msg(img))
+                # Encode/convert only when someone is listening (saves CPU on the Pi)
+                if self.image_pub.get_subscription_count() > 0:
+                    self.image_pub.publish(self.to_image_msg(img))
+                if self.jpeg_pub.get_subscription_count() > 0:
+                    ok, jpg = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality])
+                    if ok:
+                        msg = CompressedImage()
+                        msg.header.stamp = self.get_clock().now().to_msg()
+                        msg.header.frame_id = 'camera'
+                        msg.format = 'jpeg'
+                        msg.data = jpg.tobytes()
+                        self.jpeg_pub.publish(msg)
             if self.show_window:
                 cv2.imshow('golf_ball_detector', img)
                 cv2.waitKey(1)

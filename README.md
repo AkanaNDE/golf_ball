@@ -138,3 +138,15 @@ Raspberry Pi 5: export the model to NCNN (about 4x faster on ARM) and point the 
 cd ~/golf_ws/src/golf_bot_vision/models && yolo export model=golf_ball_yolo11n.pt format=ncnn imgsz=320
 ```
 then set `model: /home/<user>/golf_ws/src/golf_bot_vision/models/golf_ball_yolo11n_ncnn_model` and `imgsz: 320`.
+
+## View the Pi camera on the laptop
+The Pi publishes `/golf_ball/image/compressed` (JPEG, ~12 KB/frame). On the laptop:
+```bash
+ros2 run golf_bot_vision image_viewer
+```
+Both machines need the same `ROS_DOMAIN_ID`. On a phone hotspot (multicast blocked) also set
+each machine's peer in `~/.bashrc`, then open a new terminal:
+```bash
+export ROS_STATIC_PEERS=<IP of the other machine>   # laptop -> Pi IP, Pi -> laptop IP
+```
+Check with `ros2 topic list`: the laptop should list `/golf_ball/image/compressed`.

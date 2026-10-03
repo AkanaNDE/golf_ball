@@ -23,6 +23,7 @@ setup(
         'console_scripts': [
             'golf_ball_detector = golf_bot_vision.golf_ball_detector:main',
             'ball_chaser = golf_bot_vision.ball_chaser:main',
+            'image_viewer = golf_bot_vision.image_viewer:main',
         ],
     },
 )
