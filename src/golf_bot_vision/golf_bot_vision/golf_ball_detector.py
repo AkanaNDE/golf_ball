@@ -17,6 +17,7 @@ Model (parameter `model`):
 `imgsz` 0 = auto: 320 for NCNN (the size it was exported with), 640 for .pt
 """
 
+import glob
 import os
 import time
 
@@ -36,7 +37,7 @@ class GolfBallDetector(Node):
 
         self.declare_parameters('', [
             ('model', 'auto'),
-            ('camera', '0'),            # index ("0") or device path ("/dev/video0")
+            ('camera', 'auto'),         # "auto", an index ("0") or a path ("/dev/video8")
             ('width', 640),
             ('height', 480),
             ('flip', False),            # rotate 180 deg if the camera is mounted upside down
@@ -67,14 +68,7 @@ class GolfBallDetector(Node):
         self.get_logger().info(f'Loading model {model_path} (imgsz {self.imgsz})')
         self.model = YOLO(model_path, task='detect')
 
-        cam = p('camera')
-        cam = int(cam) if str(cam).isdigit() else cam
-        self.cap = cv2.VideoCapture(cam)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, p('width'))
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, p('height'))
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # always process the newest frame
-        if not self.cap.isOpened():
-            raise RuntimeError(f'Cannot open camera {cam}')
+        cam, self.cap = self.open_camera(str(p('camera')), p('width'), p('height'))
 
         self.target_pub = self.create_publisher(PointStamped, 'golf_ball/target', 10)
         self.image_pub = self.create_publisher(Image, 'golf_ball/image', 2)
@@ -84,6 +78,30 @@ class GolfBallDetector(Node):
         self.fps = 0.0
         self.last_time = time.monotonic()
         self.get_logger().info(f'Detecting golf balls from camera {cam}')
+
+    def open_camera(self, camera, width, height):
+        """Open the camera; "auto" tries every /dev/video* until one returns a frame.
+
+        Raspberry Pi 5 exposes many /dev/video* nodes that are not cameras (decoder, ISP),
+        so a USB webcam is usually not /dev/video0 there.
+        """
+        if camera == 'auto':
+            candidates = sorted(glob.glob('/dev/video*'), key=lambda d: int(d[10:] or 0))
+        else:
+            candidates = [int(camera) if camera.isdigit() else camera]
+        for dev in candidates:
+            cap = cv2.VideoCapture(dev, cv2.CAP_V4L2)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # always process the newest frame
+                ok, _ = cap.read()
+                if ok:
+                    return dev, cap
+            cap.release()
+        raise RuntimeError(
+            f'No working camera found (tried {", ".join(map(str, candidates)) or "none"}). '
+            'Check the USB webcam with: v4l2-ctl --list-devices')
 
     @staticmethod
     def resolve_model(model):

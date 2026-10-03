@@ -44,7 +44,7 @@ wheel_odometry:
 golf_ball_detector:
   ros__parameters:
     model: auto             # NCNN folder if exported (Pi), else golf_ball_yolo11n.pt; or a full path
-    camera: "0"             # "0" = /dev/video0, or a path like "/dev/video2"
+    camera: auto            # first /dev/video* that gives a frame; or "0" / "/dev/video8"
     width: 640
     height: 480
     flip: false             # true if the camera is mounted upside down
