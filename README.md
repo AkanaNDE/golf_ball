@@ -13,6 +13,7 @@ wheel_odometry <──/wheel_vel── ESP32 (kinematics + PID + motors) <──
 | Path | What |
 |---|---|
 | `src/golf_bot_control` | `xbox_teleop` (joy → cmd_vel) and `wheel_odometry` (wheel_vel → odom) |
+| `src/golf_bot_vision` | `golf_ball_detector` (camera + YOLO11n `models/golf_ball_yolo11n.pt`) and `ball_chaser` (drive to nearest ball) |
 | `src/golf_bot_bringup` | `bringup.launch.py` and `config/golf_bot.yaml` (all tunable parameters) |
 | `firmware/golf_bot_esp32` | PlatformIO micro-ROS firmware, pins and dimensions in `include/config.h` |
 
@@ -41,7 +42,8 @@ Test the controller without the robot: `use_agent:=false`, then `ros2 topic echo
 | Left stick ↑↓ | Forward / backward |
 | Right stick ←→ | Turn |
 | RB (hold) | Turbo |
-| B | Emergency stop (latched) |
+| Y | AUTO on/off: chase golf balls (needs `use_vision:=true`) |
+| B | Emergency stop (latched, also turns AUTO off) |
 | Start | Release emergency stop |
 
 ## 4-wheel diff drive equations
@@ -110,3 +112,29 @@ Update after pushing changes from the PC:
 cd ~/golf_ws && git pull && colcon build --symlink-install
 ```
 Flash the ESP32 from the PC (PlatformIO); the Pi only needs the USB cable to the ESP32.
+
+## Golf ball detection and AUTO mode
+```bash
+pip install ultralytics      # once (on Ubuntu 24.04 add --break-system-packages)
+ros2 launch golf_bot_bringup bringup.launch.py use_vision:=true
+```
+Press **Y** to start AUTO: `ball_chaser` turns toward the nearest ball, drives to it, slows down
+as it gets close, drives straight over it (`collect_time`), then searches for the next one.
+Holding **LB** takes over manually at any time; **B** stops everything; AUTO also stops if the
+joystick or the detector goes silent. View the camera: `ros2 run rqt_image_view rqt_image_view /golf_ball/image`.
+
+| Topic | Type | Meaning |
+|---|---|---|
+| `/golf_ball/target` | PointStamped | x = offset −1 (left) .. +1 (right), y = ball bottom 0 (top) .. 1 (bottom/close), z = confidence |
+| `/golf_ball/image` | Image | annotated camera image |
+| `/cmd_vel_auto` | Twist | ball_chaser command, forwarded by xbox_teleop only in AUTO |
+| `/ball_chaser/state` | String | SEARCH / TRACK / WAIT / COLLECT |
+
+Tuning (in `golf_bot.yaml`): `arrive_y` / `collect_time` so the ball ends up in the collector,
+`kp_angular` if it oscillates (lower) or turns too slowly (higher), `max_linear` for speed.
+
+Raspberry Pi 5: export the model to NCNN (about 4x faster on ARM) and point the detector at it:
+```bash
+cd ~/golf_ws/src/golf_bot_vision/models && yolo export model=golf_ball_yolo11n.pt format=ncnn imgsz=320
+```
+then set `model: /home/<user>/golf_ws/src/golf_bot_vision/models/golf_ball_yolo11n_ncnn_model` and `imgsz: 320`.

@@ -23,6 +23,8 @@ xbox_teleop:
     button_turbo: 5         # RB
     button_estop: 1        # B
     button_estop_release: 7 # Start
+    button_auto: 3          # Y: toggle AUTO (follow /cmd_vel_auto from ball_chaser)
+    auto_timeout: 0.5       # s, stop if ball_chaser goes silent
     # Smooth speed ramp: how fast the command may change
     accel_linear: 0.5       # m/s^2   speeding up   (0 -> 0.4 m/s in 0.8 s)
     decel_linear: 1.0       # m/s^2   slowing down  (0.4 -> 0 m/s in 0.4 s)
@@ -38,3 +40,30 @@ wheel_odometry:
     odom_frame: odom
     base_frame: base_link
     publish_tf: true
+
+golf_ball_detector:
+  ros__parameters:
+    camera: "0"             # "0" = /dev/video0, or a path like "/dev/video2"
+    width: 640
+    height: 480
+    flip: false             # true if the camera is mounted upside down
+    imgsz: 640              # use 320 on Raspberry Pi 5 (about 4x faster)
+    confidence: 0.4
+    max_rate: 15.0          # Hz
+    publish_image: true     # /golf_ball/image for rqt_image_view
+    image_every_n: 3
+    show_window: false
+
+ball_chaser:
+  ros__parameters:
+    kp_angular: 1.5         # rad/s per unit image offset
+    max_angular: 1.0        # rad/s
+    max_linear: 0.3         # m/s, ball far and centered
+    min_linear: 0.08        # m/s, ball almost reached
+    align_threshold: 0.3    # |offset| above this: turn in place only
+    slow_down_y: 0.6        # start slowing when ball bottom passes 60% of image height
+    arrive_y: 0.92          # ball bottom at 92% of image height = reached
+    collect_speed: 0.15     # m/s straight drive over the ball
+    collect_time: 1.5       # s
+    search_delay: 1.0       # s
+    search_angular: 0.5     # rad/s turning in place to search

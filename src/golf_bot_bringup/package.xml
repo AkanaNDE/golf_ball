@@ -12,6 +12,7 @@
   <exec_depend>golf_bot_control</exec_depend>
   <exec_depend>joy</exec_depend>
   <exec_depend>micro_ros_agent</exec_depend>
+  <exec_depend>golf_bot_vision</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
 

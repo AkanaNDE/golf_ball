@@ -8,7 +8,9 @@ Default mapping (joy_node, Xbox controller over USB / xpad driver):
   RB (hold)        turbo speed
   Left stick Y     forward / backward
   Right stick X    turn left / right
-  B                emergency stop (latched, stops immediately without ramp)
+  Y                toggle AUTO mode: drive with /cmd_vel_auto (ball_chaser)
+                   holding LB in AUTO takes over manually; joystick lost -> stop
+  B                emergency stop (latched, stops immediately, also leaves AUTO)
   Start            release emergency stop
 
 Speed changes are ramped (accel_* / decel_* parameters), so the robot speeds up
@@ -22,6 +24,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import Joy
+from std_msgs.msg import Bool
 
 
 class XboxTeleop(Node):
@@ -40,6 +43,8 @@ class XboxTeleop(Node):
             ('button_turbo', 5),
             ('button_estop', 1),
             ('button_estop_release', 7),
+            ('button_auto', 3),
+            ('auto_timeout', 0.5),
             ('accel_linear', 0.5),
             ('decel_linear', 1.0),
             ('accel_angular', 2.0),
@@ -58,6 +63,8 @@ class XboxTeleop(Node):
         self.btn_turbo = p('button_turbo')
         self.btn_estop = p('button_estop')
         self.btn_estop_release = p('button_estop_release')
+        self.btn_auto = p('button_auto')
+        self.auto_timeout = p('auto_timeout')
         self.joy_timeout = p('joy_timeout')
         self.accel_linear = p('accel_linear')
         self.decel_linear = p('decel_linear')
@@ -68,18 +75,23 @@ class XboxTeleop(Node):
         self.cur_angular = 0.0
 
         self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 10)
+        self.auto_pub = self.create_publisher(Bool, 'auto_mode', 10)
         self.create_subscription(Joy, 'joy', self.on_joy, 10)
+        self.create_subscription(Twist, 'cmd_vel_auto', self.on_cmd_auto, 10)
         self.create_timer(1.0 / p('publish_rate'), self.on_timer)
 
         self.last_joy = None
         self.last_joy_time = None
         self.prev_buttons = []
         self.estop = False
+        self.auto = False
+        self.auto_cmd = Twist()
+        self.auto_cmd_time = None
         self.was_driving = False
         self.joy_lost_reported = False
 
         self.get_logger().info(
-            'Xbox teleop ready: hold LB to drive, RB turbo, B e-stop, Start release')
+            'Xbox teleop ready: hold LB to drive, RB turbo, Y auto, B e-stop, Start release')
 
     # --- helpers -----------------------------------------------------------
     @staticmethod
@@ -100,21 +112,37 @@ class XboxTeleop(Node):
     def on_joy(self, joy):
         if self._pressed(joy, self.btn_estop):
             self.estop = True
+            self.auto = False
             self.get_logger().warn('EMERGENCY STOP (press Start to release)')
         if self._pressed(joy, self.btn_estop_release) and self.estop:
             self.estop = False
             self.get_logger().info('Emergency stop released')
+        if self._pressed(joy, self.btn_auto) and not self.estop:
+            self.auto = not self.auto
+            self.get_logger().info(f'AUTO mode {"ON" if self.auto else "OFF"}')
 
         self.prev_buttons = list(joy.buttons)
         self.last_joy = joy
         self.last_joy_time = self.get_clock().now()
         self.joy_lost_reported = False
 
+    def on_cmd_auto(self, msg):
+        self.auto_cmd = msg
+        self.auto_cmd_time = self.get_clock().now()
+
+    def _auto_cmd_fresh(self):
+        if self.auto_cmd_time is None:
+            return False
+        age = (self.get_clock().now() - self.auto_cmd_time).nanoseconds * 1e-9
+        return age < self.auto_timeout
+
     def on_timer(self):
         alive = self._joy_alive()
         if not alive and self.last_joy is not None and not self.joy_lost_reported:
-            self.get_logger().warn('Joystick lost: stopping robot')
+            self.get_logger().warn('Joystick lost: stopping robot (AUTO off)')
             self.joy_lost_reported = True
+            self.auto = False
+        self.auto_pub.publish(Bool(data=self.auto))
 
         joy = self.last_joy
         deadman = alive and joy is not None and self._get(joy.buttons, self.btn_deadman) == 1
@@ -137,13 +165,17 @@ class XboxTeleop(Node):
             ang = self.scale_angular_turbo if turbo else self.scale_angular
             target_linear = lin * float(self._get(joy.axes, self.axis_linear, 0.0))
             target_angular = ang * float(self._get(joy.axes, self.axis_angular, 0.0))
+        elif self.auto and alive and self._auto_cmd_fresh():
+            # AUTO: follow ball_chaser (still ramped). The joystick must stay connected.
+            target_linear = self.auto_cmd.linear.x
+            target_angular = self.auto_cmd.angular.z
 
         self.cur_linear = self._ramp(self.cur_linear, target_linear,
                                      self.accel_linear, self.decel_linear)
         self.cur_angular = self._ramp(self.cur_angular, target_angular,
                                       self.accel_angular, self.decel_angular)
 
-        if self.cur_linear != 0.0 or self.cur_angular != 0.0 or deadman:
+        if self.cur_linear != 0.0 or self.cur_angular != 0.0 or deadman or self.auto:
             twist = Twist()
             twist.linear.x = self.cur_linear
             twist.angular.z = self.cur_angular
