@@ -1,0 +1,55 @@
+# AprilTag tour mission (ros2 launch golf_bot_bringup tag_mission.launch.py)
+# Joystick / teleop / odometry parameters are shared from golf_bot.yaml.
+
+tag_mission:
+  ros__parameters:
+    # --- camera and tags -------------------------------------------------------
+    camera: auto              # first /dev/video* that gives a frame, or "/dev/video0"
+    width: 640
+    height: 480
+    flip: false
+    tag_family: "36h11"       # tag36h11 / tag25h9 / tag16h5 / tag36h10
+    tag_size: 0.15            # m, side of the black square (measure your print!)
+    focal_px: 0.0             # 0 = from hfov_deg; better: run tag_focal_calibration
+    hfov_deg: 70.0            # horizontal field of view, only used when focal_px = 0
+    camera_offset: 0.15       # m, camera in front of the robot's turning centre
+    camera_latency: 0.08      # s, frame age when it is processed
+
+    # --- pose estimate -----------------------------------------------------------
+    pose_source: cmd          # cmd: integrate /cmd_vel (no encoders) | odom: /odom twist
+    yaw_scale: 1.0            # initial true/commanded yaw ratio (re-measured every scan)
+    linear_scale: 1.0         # true/commanded forward speed ratio
+
+    # --- scan ----------------------------------------------------------------------
+    scan_speed: 0.4           # rad/s, + = counter-clockwise; slower = sharper images
+    scan_extra_deg: 45.0      # turn this much past 360 so tags can be seen twice
+    scan_max_deg: 540.0       # give up calibrating after this much turning
+    min_observations: 3       # a tag needs this many detections to count (rejects false hits)
+
+    # --- planner (also the motion model for the time estimate) -------------------
+    v_max: 0.25               # m/s
+    w_max: 0.8                # rad/s
+    standoff: 0.5             # m, stop this far in front of each tag
+    leg_overhead: 0.5         # s per leg for accelerating / braking
+    exact_limit: 10           # exact optimum up to this many tags, heuristic above
+
+    # --- control -------------------------------------------------------------------
+    rate: 20.0
+    k_heading: 1.5            # rad/s per rad of heading error
+    k_distance: 0.8           # m/s per m of remaining distance
+    v_min: 0.06
+    w_min: 0.25               # skid steer needs some minimum turn rate to move at all
+    turn_in_place_deg: 25.0   # turn in place first if the tag is further off than this
+    arrive_tolerance: 0.08    # m
+    lost_timeout: 0.6         # s, a tag counts as visible this long after last detection
+    local_search_deg: 70.0    # sweep +/- this when a tag is not where the map says
+    dwell_time: 1.0           # s stop at each tag
+    leg_timeout_factor: 3.0   # skip a tag after 3x its planned time (+10 s)
+    relocalize_gain: 0.7      # how much to trust a tag sighting to correct the pose
+    require_auto: true        # wait for AUTO (Y on the joystick)
+
+    # --- dry run without camera / robot ----------------------------------------------
+    simulate: false
+    sim_tags: [2.0, 1.0, -1.5, 2.0, 1.0, -2.5, -2.0, -1.0]   # x, y pairs (m), ids 0, 1, ...
+    sim_yaw_scale: 0.85       # simulated wheel slip: true yaw = 0.85 x commanded
+    sim_noise: 0.03

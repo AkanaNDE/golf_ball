@@ -14,6 +14,7 @@ wheel_odometry <──/wheel_vel── ESP32 (kinematics + PID + motors) <──
 |---|---|
 | `src/golf_bot_control` | `xbox_teleop` (joy → cmd_vel) and `wheel_odometry` (wheel_vel → odom) |
 | `src/golf_bot_vision` | `golf_ball_detector` (camera + YOLO11n `models/golf_ball_yolo11n.pt`) and `ball_chaser` (drive to nearest ball) |
+| `src/golf_bot_tags` | `tag_mission`: AprilTag scan + time-optimal tour (see below), `tag_focal_calibration` |
 | `src/golf_bot_bringup` | `bringup.launch.py` and `config/golf_bot.yaml` (all tunable parameters) |
 | `firmware/golf_bot_esp32` | PlatformIO micro-ROS firmware, pins and dimensions in `include/config.h` |
 
@@ -150,3 +151,29 @@ each machine's peer in `~/.bashrc`, then open a new terminal:
 export ROS_STATIC_PEERS=<IP of the other machine>   # laptop -> Pi IP, Pi -> laptop IP
 ```
 Check with `ros2 topic list`: the laptop should list `/golf_ball/image/compressed`.
+
+## AprilTag tour mission
+Same robot, new task: turn 360° to find every AprilTag, measure each tag's distance from its
+apparent size, then visit all of them in the fastest order.
+```bash
+ros2 launch golf_bot_bringup tag_mission.launch.py                          # real robot, press Y
+ros2 launch golf_bot_bringup tag_mission.launch.py simulate:=true use_agent:=false   # dry run
+ros2 run golf_bot_vision image_viewer --ros-args -p topic:=tag_mission/image/compressed
+```
+Parameters: `src/golf_bot_bringup/config/tag_mission.yaml` (set `tag_size` to your printed tags).
+
+**Algorithm: Scan → Calibrate → Map → Plan → Visit → Relocalize → Replan**
+
+| Step | What happens |
+|---|---|
+| Scan | Turn in place ~405°, store every detection with the robot pose *at frame time* (pose history, camera latency compensated). |
+| Calibrate | Visual loop closure: each tag crosses the image centre once per *real* revolution, so odometry-yaw between two crossings = 360°. Gives the true/commanded yaw ratio (skid-steer slip) for the map and all later dead reckoning. |
+| Map | Distance `Z = f·tag_size / h_px` with `h_px` = mean of the two *vertical* edges (unchanged when the tag is turned). Observations are fused per tag with inverse-variance weights (σ ∝ Z/h_px, more at image edges); a tag needs ≥3 detections. |
+| Plan | Minimise *time*, not just distance: leg cost = turn-in-place time + drive time + overhead, and the turn depends on the arrival heading, so the state is (visited set, previous tag, last tag). Held-Karp gives the exact optimum up to 10 tags (ms); insertion + 2-opt/or-opt above. Open tour (no return). |
+| Visit | Turn toward the next tag, drive by dead reckoning; as soon as the tag is visible, steer and stop on the camera measurement (`standoff` in front). Not visible where expected → ±70° sweep → skip. |
+| Relocalize | At each tag the measured offset to its mapped position corrects the robot's x/y, so drift does not accumulate. |
+| Replan | Re-plan the remaining tags from the corrected pose after every visit / skip. |
+
+Focal length for distances: put a tag 1.00 m in front of the camera and run
+`ros2 run golf_bot_tags tag_focal_calibration --distance 1.0 --size 0.15`, copy `focal_px` into the YAML.
+Tests: `cd src/golf_bot_tags && python3 -m pytest test/`.
