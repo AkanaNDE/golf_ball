@@ -48,6 +48,38 @@ class TagObservation:
         return math.atan2(-self.x, self.z)
 
 
+def open_camera(camera='auto', width=640, height=480):
+    """Open a V4L2 camera; 'auto' tries every /dev/video* until one returns a frame.
+
+    Opens by index (OpenCV 5 cannot open V4L2 devices by path), and skips the many
+    non-camera /dev/video* nodes of a Raspberry Pi 5.
+    """
+    import glob
+    import re
+    camera = str(camera)
+    devs = (sorted(glob.glob('/dev/video*'), key=lambda d: int(d[10:] or 0))
+            if camera == 'auto' else [camera])
+    for dev in devs:
+        if re.fullmatch(r'/dev/video\d+', dev):
+            index = int(dev[len('/dev/video'):])
+        else:
+            index = int(dev) if dev.isdigit() else dev
+        cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+        if cap.isOpened():
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            if cap.read()[0]:
+                return dev, cap
+        cap.release()
+    raise RuntimeError(f'No working camera found (tried {devs}). Check: v4l2-ctl --list-devices')
+
+
+def encode_jpeg(img, quality=60):
+    ok, jpg = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    return jpg.tobytes() if ok else None
+
+
 def focal_from_hfov(width, hfov_deg):
     return (width / 2.0) / math.tan(math.radians(hfov_deg) / 2.0)
 

@@ -180,5 +180,11 @@ Parameters: `src/golf_bot_bringup/config/tag_mission.yaml` (set `tag_size` to yo
 | Replan | Re-plan the remaining tags from the corrected pose after every visit / skip. |
 
 Focal length for distances: put a tag 1.00 m in front of the camera and run
-`ros2 run golf_bot_tags tag_focal_calibration --distance 1.0 --size 0.15`, copy `focal_px` into the YAML.
+`ros2 run golf_bot_tags tag_focal_calibration --distance 1.0 --size 0.15` on the robot; Ctrl+C when
+the printed value is stable, copy `focal_px` into the YAML.
+
+**Camera on the laptop** (calibration, tag mission and golf ball mode alike): run
+`ros2 run golf_bot_vision image_viewer` on the laptop; it shows whichever stream is active
+(`/tag_calibration/...`, `/tag_mission/...`, `/golf_ball/image/compressed`, JPEG ~8 FPS).
+Needs the same `ROS_DOMAIN_ID` and, on a phone hotspot, `ROS_STATIC_PEERS` (see above).
 Tests: `cd src/golf_bot_tags && python3 -m pytest test/`.

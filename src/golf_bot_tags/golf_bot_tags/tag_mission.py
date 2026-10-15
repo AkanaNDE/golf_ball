@@ -43,7 +43,8 @@ from std_msgs.msg import Bool, String
 from visualization_msgs.msg import Marker, MarkerArray
 
 from golf_bot_tags.tag_map import PoseHistory, ScanCalibrator, TagMap
-from golf_bot_tags.tag_vision import CameraThread, SimulatedCamera, TagDetector
+from golf_bot_tags.tag_vision import (CameraThread, SimulatedCamera, TagDetector, encode_jpeg,
+                                      open_camera)
 from golf_bot_tags.tour_planner import MotionModel, plan_tour, wrap
 
 
@@ -114,12 +115,13 @@ class TagMission(Node):
                                    f'{self.p["sim_yaw_scale"]}')
         else:
             detector = TagDetector(g('tag_family'), g('tag_size'), g('focal_px'), g('hfov_deg'))
-            cam, cap = self.open_camera(str(g('camera')), g('width'), g('height'))
+            cam, cap = open_camera(g('camera'), g('width'), g('height'))
             self.camera = CameraThread(cap, detector, g('flip'))
             self.get_logger().info(
                 f'Camera {cam}, tag {g("tag_family")} {g("tag_size") * 100:.1f} cm, '
                 f'focal {detector.focal(g("width")):.0f} px')
         self.last_frame = -1
+        self.last_image = 0.0
 
         # ROS interfaces
         self.cmd_pub = self.create_publisher(Twist, 'cmd_vel_auto', 10)
@@ -151,24 +153,6 @@ class TagMission(Node):
                 'or Ctrl+C / emergency switch')
 
     # ------------------------------------------------------------------ setup
-    def open_camera(self, camera, width, height):
-        import glob
-        import re
-        devs = sorted(glob.glob('/dev/video*'), key=lambda d: int(d[10:] or 0)) \
-            if camera == 'auto' else [camera]
-        for dev in devs:
-            index = int(dev[10:]) if re.fullmatch(r'/dev/video\d+', dev) else (
-                int(dev) if dev.isdigit() else dev)
-            cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
-            if cap.isOpened():
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                if cap.read()[0]:
-                    return dev, cap
-            cap.release()
-        raise RuntimeError(f'No working camera found in {devs}')
-
     def reset_mission(self):
         self.pose = [0.0, 0.0, 0.0]
         self.tag_map.clear()
@@ -255,7 +239,7 @@ class TagMission(Node):
         """Observations from a frame not processed yet, with the pose at frame time."""
         frame, obs, stamp, frames = self.camera.latest()
         if frames == self.last_frame:
-            return [], None, frame
+            return [], None, None      # nothing new (the image is not re-sent either)
         self.last_frame = frames
         self.frame_stamp = stamp - self.p['camera_latency']
         pose = self.history.at(self.frame_stamp) or tuple(self.pose)
@@ -286,7 +270,9 @@ class TagMission(Node):
         twist = Twist()
         twist.linear.x, twist.angular.z = self.out
         self.cmd_pub.publish(twist)
-        if frame is not None and self.image_pub.get_subscription_count() > 0:
+        if (frame is not None and time.monotonic() - self.last_image > 0.12
+                and self.image_pub.get_subscription_count() > 0):
+            self.last_image = time.monotonic()  # ~8 FPS max over WiFi
             self.publish_image(frame, obs)
 
     def ramp(self, current, target, accel):
@@ -522,11 +508,11 @@ class TagMission(Node):
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
         cv2.putText(img, f'{self.state} target={self.target} visited={len(self.visited)}',
                     (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-        ok, jpg = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 60])
-        if ok:
+        data = encode_jpeg(img)
+        if data:
             msg = CompressedImage()
             msg.header.stamp = self.get_clock().now().to_msg()
-            msg.format, msg.data = 'jpeg', jpg.tobytes()
+            msg.format, msg.data = 'jpeg', data
             self.image_pub.publish(msg)
 
     def destroy_node(self):

@@ -2,10 +2,12 @@
 
   ros2 run golf_bot_vision image_viewer
 
-Subscribes:
-  /golf_ball/image/compressed  sensor_msgs/CompressedImage  JPEG from golf_ball_detector
-  /ball_chaser/state           std_msgs/String              shown as an overlay
-  /auto_mode                   std_msgs/Bool                shown as an overlay
+By default it listens to every robot camera stream and shows whichever is active:
+  /golf_ball/image/compressed        golf_ball_detector (golf ball mode)
+  /tag_mission/image/compressed      tag_mission (AprilTag mission)
+  /tag_calibration/image/compressed  tag_focal_calibration
+(-p topic:=<name> to show only one.) Status overlays: /ball_chaser/state, /auto_mode,
+/tag_mission/status.
 Press q or Esc in the window to quit.
 """
 
@@ -20,34 +22,43 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import Bool, String
 
-WINDOW = 'golf ball camera'
+WINDOW = 'robot camera'
+TOPICS = ['golf_ball/image/compressed', 'tag_mission/image/compressed',
+          'tag_calibration/image/compressed']
 
 
 class ImageViewer(Node):
 
     def __init__(self):
         super().__init__('golf_ball_image_viewer')
-        self.declare_parameter('topic', 'golf_ball/image/compressed')
+        self.declare_parameter('topic', '')
         self.declare_parameter('scale', 1.0)
         self.scale = float(self.get_parameter('scale').value)
 
         topic = self.get_parameter('topic').value
+        topics = [topic] if topic else TOPICS
         # Best effort: drop late frames instead of queueing them over slow WiFi
-        self.create_subscription(CompressedImage, topic, self.on_image, qos_profile_sensor_data)
+        for t in topics:
+            self.create_subscription(CompressedImage, t,
+                                     lambda msg, t=t: self.on_image(msg, t), qos_profile_sensor_data)
         self.create_subscription(String, 'ball_chaser/state', self.on_state, 10)
+        self.create_subscription(String, 'tag_mission/status', self.on_mission, 10)
         self.create_subscription(Bool, 'auto_mode', self.on_auto, 10)
         self.create_timer(0.03, self.on_timer)
 
         self.frame = None
         self.state = '-'
         self.auto = None
+        self.mission = None
+        self.source = ''
         self.fps = 0.0
         self.last_rx = None
         self.kbytes = 0.0
         cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
-        self.get_logger().info(f'Waiting for images on /{topic} (q / Esc to quit)')
+        self.get_logger().info(f'Waiting for images on {", ".join("/" + t for t in topics)} '
+                               '(q / Esc to quit)')
 
-    def on_image(self, msg):
+    def on_image(self, msg, topic=''):
         img = cv2.imdecode(np.frombuffer(msg.data, np.uint8), cv2.IMREAD_COLOR)
         if img is None:
             return
@@ -57,9 +68,15 @@ class ImageViewer(Node):
         self.last_rx = now
         self.kbytes = len(msg.data) / 1024.0
         self.frame = img
+        if topic != self.source:
+            self.source = topic
+            self.get_logger().info(f'Showing /{topic}')
 
     def on_state(self, msg):
         self.state = msg.data
+
+    def on_mission(self, msg):
+        self.mission = msg.data
 
     def on_auto(self, msg):
         self.auto = msg.data
@@ -75,8 +92,14 @@ class ImageViewer(Node):
                 img = cv2.resize(img, None, fx=self.scale, fy=self.scale)
             h = img.shape[0]
             stale = self.last_rx is not None and time.monotonic() - self.last_rx > 2.0
-            auto = 'AUTO' if self.auto else ('MANUAL' if self.auto is not None else '?')
-            text = f'{auto}  {self.state}  {self.fps:.1f} FPS  {self.kbytes:.0f} KB'
+            if self.source.startswith('golf_ball'):
+                auto = 'AUTO' if self.auto else ('MANUAL' if self.auto is not None else '?')
+                text = f'{auto}  {self.state}  {self.fps:.1f} FPS  {self.kbytes:.0f} KB'
+            else:
+                text = f'{self.fps:.1f} FPS  {self.kbytes:.0f} KB'
+                if self.source.startswith('tag_mission') and self.mission:
+                    cv2.putText(img, self.mission[:90], (8, h - 34),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
             color = (0, 0, 255) if stale else (0, 255, 255)
             if stale:
                 text += '  (no new frames)'
