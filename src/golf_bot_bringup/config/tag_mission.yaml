@@ -47,6 +47,9 @@ tag_mission:
     leg_timeout_factor: 3.0   # skip a tag after 3x its planned time (+10 s)
     relocalize_gain: 0.7      # how much to trust a tag sighting to correct the pose
     require_auto: true        # wait for AUTO (Y on the joystick)
+    start_delay: 5.0          # s countdown before moving when require_auto is false
+    accel_linear: 0.5         # m/s^2 ramp on the mission's own commands (brakes 2x harder)
+    accel_angular: 2.0        # rad/s^2
 
     # --- dry run without camera / robot ----------------------------------------------
     simulate: false

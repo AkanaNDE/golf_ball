@@ -19,9 +19,14 @@ Algorithm "Scan - Calibrate - Plan - Visit - Relocalize - Replan":
             robot's (x, y) - drift does not accumulate over the tour.
   REPLAN    plan the remaining tags again from the corrected pose (milliseconds).
 
-Safety: the node only publishes /cmd_vel_auto. xbox_teleop forwards it to /cmd_vel while
-AUTO mode (Y) is on and the joystick is alive; LB overrides, B stops. When AUTO is switched
-off the mission pauses and resumes where it was; switching AUTO on after DONE starts again.
+Safety, with joystick (tag_mission.launch.py): the node publishes /cmd_vel_auto and
+xbox_teleop forwards it to /cmd_vel while AUTO (Y) is on; LB overrides, B stops. AUTO off
+pauses the mission, AUTO on resumes it (or starts a new one after DONE).
+Without joystick (tag_mission_auto.launch.py, require_auto: false): /cmd_vel_auto is remapped
+to /cmd_vel, the mission starts after `start_delay` seconds, and
+  ros2 topic pub --once /tag_mission/stop std_msgs/msg/Bool "{data: true}"   pauses (false resumes).
+Commands are ramped (accel_linear / accel_angular) because no teleop smooths them, and the
+ESP32 stops the wheels by itself if this node dies (no /cmd_vel for 0.5 s).
 """
 
 import math
@@ -71,6 +76,9 @@ class TagMission(Node):
             ('lost_timeout', 0.6), ('local_search_deg', 70.0), ('dwell_time', 1.0),
             ('leg_timeout_factor', 3.0), ('relocalize_gain', 0.7),
             ('require_auto', True),
+            ('start_delay', 5.0),            # s countdown before moving (require_auto: false)
+            ('accel_linear', 0.5),           # m/s^2 output ramp
+            ('accel_angular', 2.0),          # rad/s^2 output ramp
             # simulation (dry run without camera/robot)
             ('simulate', False), ('sim_tags', [0.0]), ('sim_yaw_scale', 0.85),
             ('sim_noise', 0.03),
@@ -81,7 +89,8 @@ class TagMission(Node):
             'scan_speed', 'scan_extra_deg', 'scan_max_deg', 'k_heading', 'k_distance', 'v_min',
             'w_min', 'turn_in_place_deg', 'arrive_tolerance', 'lost_timeout',
             'local_search_deg', 'dwell_time', 'leg_timeout_factor', 'relocalize_gain',
-            'require_auto', 'exact_limit', 'simulate', 'sim_yaw_scale']}
+            'require_auto', 'exact_limit', 'simulate', 'sim_yaw_scale', 'start_delay',
+            'accel_linear', 'accel_angular']}
         self.model = MotionModel(g('v_max'), g('w_max'), g('standoff'), g('leg_overhead'))
         self.dt = 1.0 / g('rate')
         self.yaw_scale = float(g('yaw_scale'))
@@ -118,6 +127,7 @@ class TagMission(Node):
         self.marker_pub = self.create_publisher(MarkerArray, 'tag_mission/markers', 2)
         self.image_pub = self.create_publisher(CompressedImage, 'tag_mission/image/compressed', 2)
         self.create_subscription(Bool, 'auto_mode', self.on_auto, 10)
+        self.create_subscription(Bool, 'tag_mission/stop', self.on_stop, 10)
         if self.p['pose_source'] == 'odom':
             self.create_subscription(Odometry, 'odom', self.on_odom, 10)
         else:
@@ -126,13 +136,19 @@ class TagMission(Node):
         self.create_timer(0.5, self.publish_markers)
 
         self.auto = not self.p['require_auto']
+        self.stopped = False
+        self.out = (0.0, 0.0)
         self.state = 'IDLE'
         self.state_time = time.monotonic()
         self.reset_mission()
-        if not self.p['require_auto']:
-            self.set_state('SCAN', '(require_auto = false)')
-        self.get_logger().info('Tag mission ready: press Y (AUTO) to start' if self.p['require_auto']
-                               else 'Tag mission starting (require_auto = false)')
+        if self.p['require_auto']:
+            self.get_logger().info('Tag mission ready: press Y (AUTO) to start')
+        else:
+            self.start_at = time.monotonic() + self.p['start_delay']
+            self.get_logger().warn(
+                f'NO JOYSTICK MODE: robot starts moving in {self.p["start_delay"]:.0f} s. '
+                'Stop: ros2 topic pub --once /tag_mission/stop std_msgs/msg/Bool "{data: true}" '
+                'or Ctrl+C / emergency switch')
 
     # ------------------------------------------------------------------ setup
     def open_camera(self, camera, width, height):
@@ -199,6 +215,14 @@ class TagMission(Node):
             self.leg_start = time.monotonic()  # do not count the pause against the leg
         self.auto = msg.data
 
+    def on_stop(self, msg):
+        if msg.data != self.stopped:
+            self.get_logger().warn('STOP requested: mission paused' if msg.data
+                                   else 'Stop released: mission resumed')
+            if not msg.data:
+                self.leg_start = time.monotonic()
+        self.stopped = msg.data
+
     def on_cmd(self, msg):
         self.vel = (msg.linear.x, msg.angular.z)
         self.vel_time = time.monotonic()
@@ -243,16 +267,33 @@ class TagMission(Node):
         obs, pose, frame = self.new_observations()
         if obs:
             self.latest_obs = (time.monotonic(), {o.tag_id: o for o in obs})
+        if self.state == 'IDLE' and not self.p['require_auto'] and not self.stopped:
+            left = self.start_at - time.monotonic()
+            if left <= 0:
+                self.set_state('SCAN', '(no joystick: starting)')
+            elif int(left + self.dt) != int(left + 2 * self.dt):
+                self.get_logger().info(f'Starting in {int(left) + 1} s ...')
         cmd = (0.0, 0.0)
-        active = self.auto and self.state not in ('IDLE', 'DONE')
+        active = self.auto and not self.stopped and self.state not in ('IDLE', 'DONE')
         if active:
             handler = getattr(self, 'step_' + self.state.lower())
             cmd = handler(obs, pose)
+        if active:
+            self.out = (self.ramp(self.out[0], cmd[0], self.p['accel_linear']),
+                        self.ramp(self.out[1], cmd[1], self.p['accel_angular']))
+        else:
+            self.out = (0.0, 0.0)  # paused / stopped / done: stop at once
         twist = Twist()
-        twist.linear.x, twist.angular.z = cmd
+        twist.linear.x, twist.angular.z = self.out
         self.cmd_pub.publish(twist)
         if frame is not None and self.image_pub.get_subscription_count() > 0:
             self.publish_image(frame, obs)
+
+    def ramp(self, current, target, accel):
+        # brake twice as hard as we accelerate, so stops are not overshot
+        slowing = abs(target) < abs(current) or current * target < 0
+        step = accel * self.dt * (2.0 if slowing else 1.0)
+        return clamp(target, current - step, current + step)
 
     def visible(self, tag_id):
         if not hasattr(self, 'latest_obs'):

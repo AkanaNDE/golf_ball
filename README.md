@@ -160,6 +160,11 @@ ros2 launch golf_bot_bringup tag_mission.launch.py                          # re
 ros2 launch golf_bot_bringup tag_mission.launch.py simulate:=true use_agent:=false   # dry run
 ros2 run golf_bot_vision image_viewer --ros-args -p topic:=tag_mission/image/compressed
 ```
+Without joystick (starts by itself after `start_delay`, default 5 s):
+```bash
+ros2 launch golf_bot_bringup tag_mission_auto.launch.py
+ros2 topic pub --once /tag_mission/stop std_msgs/msg/Bool "{data: true}"    # pause (false = resume)
+```
 Parameters: `src/golf_bot_bringup/config/tag_mission.yaml` (set `tag_size` to your printed tags).
 
 **Algorithm: Scan → Calibrate → Map → Plan → Visit → Relocalize → Replan**
