@@ -111,3 +111,42 @@ def test_stop_and_go_revisit_recovers_yaw_scale_and_map():
     for tid, (x, y) in tags.items():
         mx, my = m.tags()[tid]
         assert math.hypot(mx - x, my - y) < 0.08, (tid, mx, my)
+
+
+def textured_scene(seed=0, w=640, h=480):
+    rng = np.random.default_rng(seed)
+    img = np.full((h, w, 3), 128, np.uint8)
+    for _ in range(400):
+        color = tuple(int(c) for c in rng.integers(0, 255, 3))
+        x, y = int(rng.integers(0, w)), int(rng.integers(0, h))
+        if rng.random() < 0.5:
+            cv2.circle(img, (x, y), int(rng.integers(3, 25)), color, -1)
+        else:
+            cv2.rectangle(img, (x, y), (x + int(rng.integers(5, 40)), y + int(rng.integers(5, 40))),
+                          color, -1)
+    return img
+
+
+def rotated_view(img, turn_rad, f):
+    """What the camera sees after turning left by turn_rad (pure rotation homography)."""
+    h, w = img.shape[:2]
+    K = np.array([[f, 0, w / 2], [0, f, h / 2], [0, 0, 1]])
+    c, s = math.cos(turn_rad), math.sin(turn_rad)
+    R = np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+    H = K @ R @ np.linalg.inv(K)
+    return cv2.warpPerspective(img, H, (w, h))
+
+
+def test_visual_rotation_estimate():
+    from golf_bot_tags.tag_vision import RotationEstimator
+    est = RotationEstimator()
+    f = 457.0
+    scene = textured_scene()
+    kf0 = est.keyframe(scene)
+    for deg in (5, 13, 30, -20):
+        turn, n = est.turn(kf0, est.keyframe(rotated_view(scene, math.radians(deg), f)), f)
+        assert turn is not None and n >= 15, (deg, n)
+        assert abs(math.degrees(turn) - deg) < 1.0, (deg, math.degrees(turn))
+    # no texture -> no estimate instead of a wrong one
+    blank = np.full((480, 640, 3), 128, np.uint8)
+    assert est.turn(est.keyframe(blank), est.keyframe(blank), f)[0] is None

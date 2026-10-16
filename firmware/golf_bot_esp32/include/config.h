@@ -40,7 +40,7 @@
 // Easiest: run motor_test, turn one wheel exactly 1 revolution by hand,
 // and put the count it shows into ENCODER_TICKS_PER_REV directly.
 // ---------------------------------------------------------------------------
-#define USE_ENCODERS          1
+#define USE_ENCODERS          0     // 1 once the encoder cables are connected
 #define ENCODER_PPR           7       // pulses per motor revolution (per phase)
 #define GEAR_RATIO            19.2f   // gearbox ratio of your 36GP-555 version
 #define ENCODER_TICKS_PER_REV (ENCODER_PPR * 4 * GEAR_RATIO)
@@ -49,6 +49,11 @@
 #define MAX_WHEEL_SPEED     20.0f   // rad/s
 // Limit wheel acceleration so the skid-steer base does not jerk or tip.
 #define MAX_WHEEL_ACCEL     40.0f   // rad/s^2
+// Smallest PWM that actually moves the wheels (motor + gearbox friction, and skid-steer
+// scrubbing when turning in place). Any non-zero command gets at least this much:
+//   duty_out = MIN_DUTY + |duty| * (1 - MIN_DUTY)
+// Raise it if the robot hums but does not move at low speed; lower it if it jerks.
+#define MIN_DUTY            0.20f
 
 // Speed PID (per wheel), output is PWM fraction added on top of feedforward
 #define PID_KP              0.03f

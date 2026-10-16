@@ -71,7 +71,7 @@ class TagMap:
 class ScanCalibrator:
     """Records scan observations with the odometry yaw, then estimates the true yaw scale."""
 
-    def __init__(self, min_scale=0.6, max_scale=1.6):
+    def __init__(self, min_scale=0.3, max_scale=1.6):
         self.records = []  # (obs, pose)
         self.groups = []   # stop index per record (stop-and-go scan), else None
         self.min_scale = min_scale

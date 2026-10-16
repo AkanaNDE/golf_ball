@@ -26,6 +26,9 @@ tag_mission:
     scan_settle_time: 0.5     # s to wait after stopping before looking (robot stops rocking)
     scan_look_time: 0.7       # s of frames collected at each stop
     scan_speed: 0.4           # rad/s while turning, + = counter-clockwise
+    scan_visual_yaw: true     # measure the REAL turn between stops from the camera image
+                              # (scan always covers 360 deg even if wheels slip or stall)
+    scan_speed_max: 1.2       # rad/s: a stalled step raises the turn command up to this
     scan_extra_deg: 45.0      # turn this much past 360 so tags can be seen twice
     scan_max_deg: 540.0       # give up calibrating after this much turning
     min_observations: 3       # a tag needs this many detections to count (rejects false hits)
@@ -61,3 +64,5 @@ tag_mission:
     sim_yaw_scale: 0.85       # simulated wheel slip: true yaw = 0.85 x commanded
     sim_noise: 0.03
     sim_blur_speed: 0.2       # rad/s: simulated frames are too blurred above this turn rate
+    sim_min_turn_rate: 0.0    # rad/s: simulated stall when turning in place slower than this
+    sim_visual_noise_deg: 0.7

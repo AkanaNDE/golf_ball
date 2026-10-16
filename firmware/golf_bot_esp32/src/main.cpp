@@ -85,6 +85,13 @@ float updateWheel(int i, float goal, float dt, bool stopping) {
 #endif
 }
 
+// Deadband compensation: map (0, 1] onto [MIN_DUTY, 1] so small commands still move
+float withMinDuty(float duty) {
+  if (fabsf(duty) < 0.005f) return 0.0f;
+  float mag = MIN_DUTY + fminf(fabsf(duty), 1.0f) * (1.0f - MIN_DUTY);
+  return duty > 0 ? mag : -mag;
+}
+
 void controlStep(float dt) {
   bool cmd_fresh = (millis() - last_cmd_ms) < CMD_VEL_TIMEOUT_MS;
   float v = cmd_fresh ? cmd_linear : 0.0f;
@@ -111,7 +118,7 @@ void controlStep(float dt) {
 
   bool stopping = !cmd_fresh || (v == 0.0f && w == 0.0f);
   for (int i = 0; i < 4; i++) {
-    motorWrite(i, updateWheel(i, goal[i], dt, stopping));
+    motorWrite(i, withMinDuty(updateWheel(i, goal[i], dt, stopping)));
   }
 }
 

@@ -122,6 +122,55 @@ class TagDetector:
         return observations
 
 
+class RotationEstimator:
+    """Measure how far the robot really turned between two still images (visual yaw).
+
+    For a camera turning about a vertical axis, a scene point at image column u has the
+    bearing atan((u - cx) / f); after a turn of d (left positive) the same point appears
+    at bearing + d. ORB features are matched between the two images and the median
+    bearing change is the true turn - independent of wheel slip or stalled wheels.
+    """
+
+    def __init__(self, features=1500, ratio=0.75, max_dy_px=25.0, min_matches=15,
+                 inlier_deg=2.0, min_inlier_frac=0.4):
+        self.orb = cv2.ORB_create(features)
+        self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
+        self.ratio = ratio
+        self.max_dy = max_dy_px
+        self.min_matches = min_matches
+        self.inlier = math.radians(inlier_deg)
+        self.min_inlier_frac = min_inlier_frac
+
+    def keyframe(self, frame):
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+        kp, des = self.orb.detectAndCompute(gray, None)
+        return {'kp': kp, 'des': des, 'w': gray.shape[1]}
+
+    def turn(self, kf1, kf2, focal):
+        """(turn_rad, n_inliers) from keyframe 1 to keyframe 2, or (None, n) if unreliable."""
+        if kf1['des'] is None or kf2['des'] is None or len(kf1['kp']) < 2 or len(kf2['kp']) < 2:
+            return None, 0
+        cx = kf1['w'] / 2.0
+        diffs = []
+        for pair in self.matcher.knnMatch(kf1['des'], kf2['des'], k=2):
+            if len(pair) < 2 or pair[0].distance > self.ratio * pair[1].distance:
+                continue
+            p1 = kf1['kp'][pair[0].queryIdx].pt
+            p2 = kf2['kp'][pair[0].trainIdx].pt
+            if abs(p1[1] - p2[1]) > self.max_dy:   # pure rotation: rows stay (almost) the same
+                continue
+            # turning left moves the scene to the right in the image
+            diffs.append(math.atan((p2[0] - cx) / focal) - math.atan((p1[0] - cx) / focal))
+        if len(diffs) < self.min_matches:
+            return None, len(diffs)
+        diffs.sort()
+        med = diffs[len(diffs) // 2]
+        inliers = [d for d in diffs if abs(d - med) < self.inlier]
+        if len(inliers) < self.min_inlier_frac * len(diffs) or len(inliers) < self.min_matches:
+            return None, len(inliers)
+        return sum(inliers) / len(inliers), len(inliers)
+
+
 class CameraThread:
     """Reads the camera and runs detection in the background; keeps only the newest result."""
 
