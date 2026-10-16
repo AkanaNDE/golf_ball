@@ -76,3 +76,38 @@ def test_far_observations_weigh_less():
     x, _ = m.tags()[1]
     assert abs(x - 1.0) < 0.05  # dominated by the near observation
     assert m.variance(far) > m.variance(near)
+
+
+def test_stop_and_go_revisit_recovers_yaw_scale_and_map():
+    """Turn 30 deg (odometry), stop, look; true rotation is only 0.85 x odometry."""
+    import random
+    rng = random.Random(4)
+    tags = {0: (2.0, 1.0), 1: (-1.5, 2.0), 2: (1.0, -2.5), 3: (-2.0, -1.0)}
+    true_scale, offset, half_fov = 0.85, 0.15, math.radians(35)
+    cal = ScanCalibrator()
+    cal.yaw0 = 0.0
+    stop, odom = 0, 0.0
+    while odom <= math.radians(480):
+        true = odom * true_scale
+        cx, cy = offset * math.cos(true), offset * math.sin(true)  # camera ahead of centre
+        for tid, (tx, ty) in tags.items():
+            dx, dy = tx - cx, ty - cy
+            fwd = dx * math.cos(true) + dy * math.sin(true)
+            left = -dx * math.sin(true) + dy * math.cos(true)
+            if fwd > 0.2 and abs(math.atan2(left, fwd)) < half_fov:
+                for _ in range(4):  # a few sharp frames per stop
+                    z = fwd * (1 + rng.gauss(0, 0.02))
+                    x = -left + rng.gauss(0, 0.005)
+                    u = (x / z) / math.tan(half_fov)
+                    cal.record(TagObservation(tid, z, x, u, 600 * 0.15 / z, 0.0), (0, 0, odom),
+                               group=stop)
+        stop += 1
+        odom += math.radians(30)
+    scale, n = cal.yaw_scale_revisit(camera_offset=offset)
+    assert n >= 3
+    assert abs(scale - true_scale) < 0.01, scale
+    m = TagMap(camera_offset=offset, min_observations=3)
+    cal.build_map(m, scale)
+    for tid, (x, y) in tags.items():
+        mx, my = m.tags()[tid]
+        assert math.hypot(mx - x, my - y) < 0.08, (tid, mx, my)

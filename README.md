@@ -171,8 +171,8 @@ Parameters: `src/golf_bot_bringup/config/tag_mission.yaml` (set `tag_size` to yo
 
 | Step | What happens |
 |---|---|
-| Scan | Turn in place ~405°, store every detection with the robot pose *at frame time* (pose history, camera latency compensated). |
-| Calibrate | Visual loop closure: each tag crosses the image centre once per *real* revolution, so odometry-yaw between two crossings = 360°. Gives the true/commanded yaw ratio (skid-steer slip) for the map and all later dead reckoning. |
+| Scan | Turn in place ~405° in **30° steps: turn → stop → wait 0.5 s → look 0.7 s** (frames taken while turning are blurred and miss tags). Only sharp frames from standing still are used, each stored with the pose at frame time. |
+| Calibrate | Visual loop closure: a tag seen at stop A is seen again one *real* revolution later at stop B, so `scale = (360° + bearing_A − bearing_B) / odometry_turn(A→B)`. Gives the true/commanded yaw ratio (skid-steer slip) for the map and all later dead reckoning. (`scan_mode: continuous` uses centre crossings instead.) |
 | Map | Distance `Z = f·tag_size / h_px` with `h_px` = mean of the two *vertical* edges (unchanged when the tag is turned). Observations are fused per tag with inverse-variance weights (σ ∝ Z/h_px, more at image edges); a tag needs ≥3 detections. |
 | Plan | Minimise *time*, not just distance: leg cost = turn-in-place time + drive time + overhead, and the turn depends on the arrival heading, so the state is (visited set, previous tag, last tag). Held-Karp gives the exact optimum up to 10 tags (ms); insertion + 2-opt/or-opt above. Open tour (no return). |
 | Visit | Turn toward the next tag, drive by dead reckoning; as soon as the tag is visible, steer and stop on the camera measurement (`standoff` in front). Not visible where expected → ±70° sweep → skip. |

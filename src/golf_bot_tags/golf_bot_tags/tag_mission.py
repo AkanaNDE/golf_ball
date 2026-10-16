@@ -66,7 +66,11 @@ class TagMission(Node):
             ('pose_source', 'cmd'),          # 'cmd' (/cmd_vel) or 'odom' (/odom twist)
             ('yaw_scale', 1.0), ('linear_scale', 1.0),
             # scan
+            ('scan_mode', 'step'),           # step: turn-stop-look (sharp images) | continuous
             ('scan_speed', 0.4), ('scan_extra_deg', 45.0), ('scan_max_deg', 540.0),
+            ('scan_step_deg', 30.0),         # turn this much between stops (< camera FOV)
+            ('scan_settle_time', 0.5),       # s to wait after stopping (robot stops shaking)
+            ('scan_look_time', 0.7),         # s of sharp frames collected at each stop
             ('min_observations', 3),
             # planner
             ('v_max', 0.25), ('w_max', 0.8), ('standoff', 0.5), ('leg_overhead', 0.5),
@@ -83,11 +87,13 @@ class TagMission(Node):
             # simulation (dry run without camera/robot)
             ('simulate', False), ('sim_tags', [0.0]), ('sim_yaw_scale', 0.85),
             ('sim_noise', 0.03),
+            ('sim_blur_speed', 0.2),         # rad/s: faster turning gives blurred (useless) frames
         ])
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         self.p = {n: g(n) for n in [
             'camera_offset', 'camera_latency', 'pose_source', 'yaw_scale', 'linear_scale',
-            'scan_speed', 'scan_extra_deg', 'scan_max_deg', 'k_heading', 'k_distance', 'v_min',
+            'scan_speed', 'scan_extra_deg', 'scan_max_deg', 'scan_mode', 'scan_step_deg',
+            'scan_settle_time', 'scan_look_time', 'k_heading', 'k_distance', 'v_min',
             'w_min', 'turn_in_place_deg', 'arrive_tolerance', 'lost_timeout',
             'local_search_deg', 'dwell_time', 'leg_timeout_factor', 'relocalize_gain',
             'require_auto', 'exact_limit', 'simulate', 'sim_yaw_scale', 'start_delay',
@@ -109,8 +115,11 @@ class TagMission(Node):
         if self.p['simulate']:
             flat = list(g('sim_tags'))
             tags = {i: (flat[2 * i], flat[2 * i + 1]) for i in range(len(flat) // 2)}
+            self.truth_rate = 0.0
             self.camera = SimulatedCamera(tags, lambda: tuple(self.truth), g('hfov_deg'),
-                                          noise=g('sim_noise'), camera_offset=self.p['camera_offset'])
+                                          noise=g('sim_noise'), camera_offset=self.p['camera_offset'],
+                                          truth_rate=lambda: self.truth_rate,
+                                          blur_speed=g('sim_blur_speed'))
             self.get_logger().info(f'SIMULATION: {len(tags)} tags {tags}, true yaw scale '
                                    f'{self.p["sim_yaw_scale"]}')
         else:
@@ -160,6 +169,11 @@ class TagMission(Node):
         self.calib.yaw0 = 0.0          # the scan starts at the map origin, facing +x
         self.scan_turned = 0.0         # unwrapped yaw turned during the scan
         self.scan_history = PoseHistory()
+        self.scan_phase = 'turn'       # stop-and-go: turn -> settle -> look
+        self.scan_stop = 0             # index of the current stop
+        self.scan_target = 0.0         # unwrapped yaw where the next stop is
+        self.scan_phase_time = 0.0
+        self.scan_look_frames = 0
         self.ids, self.positions = [], []
         self.tour = None
         self.visited, self.missed = [], []
@@ -220,6 +234,7 @@ class TagMission(Node):
         v, w = self.vel if now - self.vel_time < 0.3 else (0.0, 0.0)
         if self.p['simulate']:  # the "real" robot under-rotates by sim_yaw_scale
             tw = w * self.p['sim_yaw_scale']
+            self.truth_rate = tw
             self.truth[0] += v * math.cos(self.truth[2] + tw * self.dt / 2) * self.dt
             self.truth[1] += v * math.sin(self.truth[2] + tw * self.dt / 2) * self.dt
             self.truth[2] = wrap(self.truth[2] + tw * self.dt)
@@ -293,6 +308,8 @@ class TagMission(Node):
     def step_scan(self, obs, pose):
         if self.mission_start is None:
             self.mission_start = time.monotonic()
+        if self.p['scan_mode'] == 'step':
+            return self.step_scan_stop_and_go(obs, pose)
         if obs:  # unwrapped yaw at frame time, so the scan can exceed one revolution
             scan_pose = self.scan_history.at(self.frame_stamp) or (
                 self.pose[0], self.pose[1], self.scan_turned)
@@ -306,6 +323,53 @@ class TagMission(Node):
             self.finish_scan(scale, n)
             return (0.0, 0.0)
         return (0.0, self.p['scan_speed'])
+
+    def step_scan_stop_and_go(self, obs, pose):
+        """Turn scan_step_deg, stop, wait until the robot is still, look, repeat.
+
+        Only frames captured after the settle time are used, so every detection comes from a
+        sharp image taken while the robot stands still (exact pose too).
+        """
+        now = time.monotonic()
+        direction = 1.0 if self.p['scan_speed'] >= 0 else -1.0
+        step = math.radians(self.p['scan_step_deg'])
+
+        if self.scan_phase == 'turn':
+            if direction * (self.scan_turned - self.scan_target) >= 0:
+                self.scan_phase, self.scan_phase_time = 'settle', now
+                return (0.0, 0.0)
+            return (0.0, self.p['scan_speed'])
+
+        if self.scan_phase == 'settle':
+            if now - self.scan_phase_time >= self.p['scan_settle_time']:
+                self.scan_phase, self.scan_phase_time = 'look', now
+                self.scan_look_frames = 0
+            return (0.0, 0.0)
+
+        # look: record sharp frames taken after the robot came to rest
+        new_frame = pose is not None
+        if new_frame and self.frame_stamp >= self.scan_phase_time - self.p['camera_latency']:
+            self.scan_look_frames += 1
+            for o in obs:
+                self.calib.record(o, (self.pose[0], self.pose[1], self.scan_turned),
+                                  group=self.scan_stop)
+        if now - self.scan_phase_time < self.p['scan_look_time']:
+            return (0.0, 0.0)
+
+        seen = sorted({o.tag_id for o, _ in self.calib.records[-50:]})
+        self.get_logger().info(
+            f'Scan stop {self.scan_stop} at {math.degrees(abs(self.scan_turned)):.0f} deg '
+            f'(odometry): {self.scan_look_frames} frames, tags so far {seen}')
+        turned = abs(self.scan_turned)
+        scale, n = self.calib.yaw_scale_revisit(self.p['camera_offset'], direction)
+        done = turned >= math.radians(360 + self.p['scan_extra_deg']) and scale is not None
+        if done or turned + step > math.radians(self.p['scan_max_deg']):
+            self.finish_scan(scale, n)
+            return (0.0, 0.0)
+        self.scan_stop += 1
+        self.scan_target = self.scan_turned + direction * step
+        self.scan_phase = 'turn'
+        return (0.0, 0.0)
 
     def finish_scan(self, scale, n):
         if scale is None:

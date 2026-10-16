@@ -7,11 +7,14 @@
    with the robot pose *at the time the frame was captured* and averaged with weight 1/var.
 
 2. Scan self-calibration (visual loop closure)
-   The robot turns in place for a bit more than one revolution. Every tag crosses the image
-   centre once per real revolution, so the yaw the odometry *believes* it turned between
-   two centre crossings of the same tag corresponds to exactly 2*pi. That gives a yaw scale
-   factor (skid-steer wheels slip when turning, so commanded/encoder yaw is usually wrong)
-   that corrects all scan observations and the rest of the mission's dead reckoning.
+   The robot turns in place for a bit more than one revolution, so tags seen at the start
+   are seen again after one *real* revolution. Skid-steer wheels slip when turning, so the
+   odometry yaw is wrong by a scale factor; the second sighting measures it:
+     continuous scan: a tag crosses the image centre once per real revolution
+                      -> odometry yaw between two crossings = 2*pi       (yaw_scale)
+     stop-and-go scan: a tag seen at stop A and again one revolution later at stop B:
+                      true turn = 2*pi + bearing_A - bearing_B           (yaw_scale_revisit)
+   The factor corrects all scan observations and the rest of the mission's dead reckoning.
 
 3. Pose history
    Poses are stored with timestamps so an observation can use the pose at frame time
@@ -70,14 +73,16 @@ class ScanCalibrator:
 
     def __init__(self, min_scale=0.6, max_scale=1.6):
         self.records = []  # (obs, pose)
+        self.groups = []   # stop index per record (stop-and-go scan), else None
         self.min_scale = min_scale
         self.max_scale = max_scale
         self.yaw0 = None
 
-    def record(self, obs, pose):
+    def record(self, obs, pose, group=None):
         if self.yaw0 is None:
             self.yaw0 = pose[2]
         self.records.append((obs, pose))
+        self.groups.append(group)
 
     def _unwrapped(self):
         # Odometry yaw is wrapped to (-pi, pi]; unwrap it in time order
@@ -128,6 +133,43 @@ class ScanCalibrator:
                 turned = abs(crossings[1] - crossings[0])
                 ratios.append(2 * math.pi / turned)
         ratios = [r for r in ratios if self.min_scale <= r <= self.max_scale]
+        if not ratios:
+            return None, 0
+        ratios.sort()
+        return ratios[len(ratios) // 2], len(ratios)
+
+    def yaw_scale_revisit(self, camera_offset=0.0, direction=1.0):
+        """(scale, n_pairs) from tags seen at two stops about one revolution apart.
+
+        At a stop the robot stands still, so the tag's bearing from the robot centre b and
+        the odometry yaw psi are both sharp. The tag direction is fixed in the world:
+            true_yaw_A + b_A = true_yaw_B + b_B - direction * 2*pi
+        and true yaw = scale * odometry yaw, so
+            scale = (b_A - b_B + direction * 2*pi) / (psi_B - psi_A)
+        """
+        per = defaultdict(lambda: [0.0, 0.0, 0])  # (tag, stop) -> sum bearing, sum yaw, n
+        for (obs, pose, yaw), group in zip(self._unwrapped(), self.groups):
+            if group is None:
+                continue
+            b = math.atan2(-obs.x, camera_offset + obs.z)
+            a = per[(obs.tag_id, group)]
+            a[0] += b
+            a[1] += yaw
+            a[2] += 1
+        views = defaultdict(list)  # tag -> [(yaw, bearing)] one per stop
+        for (tag_id, _), (sb, sy, n) in per.items():
+            views[tag_id].append((sy / n, sb / n))
+        ratios = []
+        for seq in views.values():
+            seq.sort()
+            for i, (y1, b1) in enumerate(seq):
+                for y2, b2 in seq[i + 1:]:
+                    turned = y2 - y1
+                    if abs(turned) < math.pi:          # same revolution: too short to calibrate
+                        continue
+                    r = (b1 - b2 + direction * 2 * math.pi) / turned
+                    if self.min_scale <= r <= self.max_scale:
+                        ratios.append(r)
         if not ratios:
             return None, 0
         ratios.sort()

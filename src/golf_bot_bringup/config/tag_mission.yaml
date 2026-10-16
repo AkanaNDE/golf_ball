@@ -21,7 +21,11 @@ tag_mission:
     linear_scale: 1.0         # true/commanded forward speed ratio
 
     # --- scan ----------------------------------------------------------------------
-    scan_speed: 0.4           # rad/s, + = counter-clockwise; slower = sharper images
+    scan_mode: step           # step: turn -> stop -> look (sharp images) | continuous
+    scan_step_deg: 30.0       # turn between stops; keep well below the camera FOV (~70)
+    scan_settle_time: 0.5     # s to wait after stopping before looking (robot stops rocking)
+    scan_look_time: 0.7       # s of frames collected at each stop
+    scan_speed: 0.4           # rad/s while turning, + = counter-clockwise
     scan_extra_deg: 45.0      # turn this much past 360 so tags can be seen twice
     scan_max_deg: 540.0       # give up calibrating after this much turning
     min_observations: 3       # a tag needs this many detections to count (rejects false hits)
@@ -56,3 +60,4 @@ tag_mission:
     sim_tags: [2.0, 1.0, -1.5, 2.0, 1.0, -2.5, -2.0, -1.0]   # x, y pairs (m), ids 0, 1, ...
     sim_yaw_scale: 0.85       # simulated wheel slip: true yaw = 0.85 x commanded
     sim_noise: 0.03
+    sim_blur_speed: 0.2       # rad/s: simulated frames are too blurred above this turn rate

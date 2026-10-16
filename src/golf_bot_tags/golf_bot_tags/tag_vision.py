@@ -167,12 +167,16 @@ class SimulatedCamera:
 
     `truth_pose()` returns the *true* robot pose (x, y, yaw); tags are at known world
     positions. Produces noisy observations of every tag inside the field of view.
+    Motion blur: if `truth_rate()` (true yaw rate, rad/s) is above `blur_speed`, the frame
+    is too blurred and no tag is detected (like the real camera while turning).
     """
 
     def __init__(self, tags, truth_pose, hfov_deg=70.0, max_range=6.0, noise=0.03,
-                 camera_offset=0.0, rate=15.0, seed=0):
+                 camera_offset=0.0, rate=15.0, seed=0, truth_rate=None, blur_speed=0.0):
         self.tags = tags  # {id: (x, y)}
         self.truth_pose = truth_pose
+        self.truth_rate = truth_rate
+        self.blur_speed = blur_speed
         self.half_fov = math.radians(hfov_deg) / 2.0
         self.max_range = max_range
         self.noise = noise
@@ -192,7 +196,9 @@ class SimulatedCamera:
             x, y, yaw = self.truth_pose()
             cx, cy = x + self.offset * math.cos(yaw), y + self.offset * math.sin(yaw)
             obs = []
-            for tag_id, (tx, ty) in self.tags.items():
+            blurred = (self.blur_speed > 0 and self.truth_rate is not None
+                       and abs(self.truth_rate()) > self.blur_speed)
+            for tag_id, (tx, ty) in ({} if blurred else self.tags).items():
                 dx, dy = tx - cx, ty - cy
                 fwd = dx * math.cos(yaw) + dy * math.sin(yaw)
                 left = -dx * math.sin(yaw) + dy * math.cos(yaw)
