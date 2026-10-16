@@ -9,7 +9,7 @@ tag_mission:
     height: 720               # a 15 cm tag at 5 m is ~26 px instead of ~13 px (limit ~12)
     flip: false
     tag_family: "36h11"       # tag36h11 / tag25h9 / tag16h5 / tag36h10
-    tag_size: 0.15            # m, side of the black square (measure your print!)
+    tag_size: 0.04            # m, side of the BLACK square only (not the white border)
     focal_px: 0.0             # 0 = from hfov_deg; better: run tag_focal_calibration AT THE
                               # SAME width/height (focal in px scales with resolution)
     hfov_deg: 70.0            # horizontal field of view, only used when focal_px = 0
