@@ -48,7 +48,7 @@ class TagObservation:
         return math.atan2(-self.x, self.z)
 
 
-def open_camera(camera='auto', width=640, height=480):
+def open_camera(camera='auto', width=640, height=480, fourcc='MJPG'):
     """Open a V4L2 camera; 'auto' tries every /dev/video* until one returns a frame.
 
     Opens by index (OpenCV 5 cannot open V4L2 devices by path), and skips the many
@@ -66,6 +66,8 @@ def open_camera(camera='auto', width=640, height=480):
             index = int(dev) if dev.isdigit() else dev
         cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
         if cap.isOpened():
+            if fourcc:  # MJPG: USB webcams only give full frame rate at 720p+ in MJPG
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -75,7 +77,10 @@ def open_camera(camera='auto', width=640, height=480):
     raise RuntimeError(f'No working camera found (tried {devs}). Check: v4l2-ctl --list-devices')
 
 
-def encode_jpeg(img, quality=60):
+def encode_jpeg(img, quality=60, max_width=640):
+    if img.shape[1] > max_width:  # preview only: keep WiFi traffic low at high resolutions
+        scale = max_width / img.shape[1]
+        img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     ok, jpg = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, quality])
     return jpg.tobytes() if ok else None
 
@@ -118,7 +123,9 @@ class TagDetector:
             z = f * self.tag_size / h_px
             x = (cx_px - w / 2.0) * z / f
             u = (cx_px - w / 2.0) / (w / 2.0)
-            observations.append(TagObservation(int(tag_id), z, x, u, h_px, stamp, c))
+            # plain Python floats: numpy.float32 values crash ROS message fields later
+            observations.append(TagObservation(int(tag_id), float(z), float(x), float(u),
+                                               float(h_px), stamp, c))
         return observations
 
 
@@ -269,8 +276,14 @@ class SimulatedCamera:
     """
 
     def __init__(self, tags, truth_pose, hfov_deg=70.0, max_range=6.0, noise=0.03,
-                 camera_offset=0.0, rate=15.0, seed=0, truth_rate=None, blur_speed=0.0):
+                 camera_offset=0.0, rate=15.0, seed=0, truth_rate=None, blur_speed=0.0,
+                 detector=None, width=640, height=480):
         self.tags = tags  # {id: (x, y)}
+        # With a detector the simulator renders real tag images and runs the real
+        # detection on them (same code path and data types as on the robot).
+        self.detector = detector
+        self.width, self.height = width, height
+        self.frame = None
         self.truth_pose = truth_pose
         self.truth_rate = truth_rate
         self.blur_speed = blur_speed
@@ -306,15 +319,40 @@ class SimulatedCamera:
                 z = fwd * (1.0 + self.rng.normal(0.0, self.noise))
                 x_right = -left + self.rng.normal(0.0, 0.01)
                 u = (x_right / z) / math.tan(self.half_fov)
-                obs.append(TagObservation(int(tag_id), z, x_right, u, 100.0 / z, time.monotonic()))
+                obs.append(TagObservation(int(tag_id), float(z), float(x_right), float(u),
+                                          float(100.0 / z), time.monotonic()))
+            frame = None
+            if self.detector is not None:
+                frame = self._render(obs)
+                obs = self.detector.detect(frame, time.monotonic())
             with self.lock:
-                self.observations, self.stamp = obs, time.monotonic()
+                self.observations, self.stamp, self.frame = obs, time.monotonic(), frame
                 self.frames += 1
             time.sleep(self.period)
 
+    def _render(self, obs):
+        """Grey image with each visible tag drawn at its projected position and size."""
+        w, h = self.width, self.height
+        f = self.detector.focal(w)
+        img = np.full((h, w), 170, np.uint8)
+        for o in sorted(obs, key=lambda o: -o.z):           # far tags first
+            side = int(round(f * self.detector.tag_size / o.z))
+            if side < 8:
+                continue
+            marker = cv2.aruco.generateImageMarker(self.detector.dictionary, o.tag_id, side)
+            pad = max(2, side // 8)                          # white quiet zone around the tag
+            marker = cv2.copyMakeBorder(marker, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=255)
+            cx = int(round(w / 2 + f * o.x / o.z))
+            x0, y0 = cx - marker.shape[1] // 2, h // 2 - marker.shape[0] // 2
+            xs, ys = max(0, x0), max(0, y0)
+            xe, ye = min(w, x0 + marker.shape[1]), min(h, y0 + marker.shape[0])
+            if xe > xs and ye > ys:
+                img[ys:ye, xs:xe] = marker[ys - y0:ye - y0, xs - x0:xe - x0]
+        return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
     def latest(self):
         with self.lock:
-            return None, list(self.observations), self.stamp, self.frames
+            return self.frame, list(self.observations), self.stamp, self.frames
 
     def stop(self):
         self.running = False

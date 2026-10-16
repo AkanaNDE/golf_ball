@@ -93,6 +93,7 @@ class TagMission(Node):
             ('sim_blur_speed', 0.2),         # rad/s: faster turning gives blurred (useless) frames
             ('sim_min_turn_rate', 0.0),      # rad/s: commanded turns below this do not move
             ('sim_visual_noise_deg', 0.7),   # noise of the simulated visual yaw per stop
+            ('sim_render', False),           # render tag images + run the real detector
         ])
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         self.p = {n: g(n) for n in [
@@ -130,17 +131,27 @@ class TagMission(Node):
             self.camera = SimulatedCamera(tags, lambda: tuple(self.truth), g('hfov_deg'),
                                           noise=g('sim_noise'), camera_offset=self.p['camera_offset'],
                                           truth_rate=lambda: self.truth_rate,
-                                          blur_speed=g('sim_blur_speed'))
+                                          blur_speed=g('sim_blur_speed'),
+                                          detector=TagDetector(g('tag_family'), g('tag_size'),
+                                                               g('focal_px'), g('hfov_deg'))
+                                          if g('sim_render') else None,
+                                          width=g('width'), height=g('height'))
             self.get_logger().info(f'SIMULATION: {len(tags)} tags {tags}, true yaw scale '
                                    f'{self.p["sim_yaw_scale"]}')
         else:
             detector = TagDetector(g('tag_family'), g('tag_size'), g('focal_px'), g('hfov_deg'))
             self.detector = detector
             cam, cap = open_camera(g('camera'), g('width'), g('height'))
+            real_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            real_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if (real_w, real_h) != (g('width'), g('height')):
+                self.get_logger().warn(f'Camera gives {real_w}x{real_h}, not {g("width")}x'
+                                       f'{g("height")} (focal is computed for the real size)')
             self.camera = CameraThread(cap, detector, g('flip'))
             self.get_logger().info(
                 f'Camera {cam}, tag {g("tag_family")} {g("tag_size") * 100:.1f} cm, '
-                f'focal {detector.focal(g("width")):.0f} px')
+                f'{int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}, '
+                f'focal {detector.focal(int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))):.0f} px')
         self.last_frame = -1
         self.last_image_sent = 0.0     # time the last JPEG was published
 
@@ -312,7 +323,7 @@ class TagMission(Node):
         else:
             self.out = (0.0, 0.0)  # paused / stopped / done: stop at once
         twist = Twist()
-        twist.linear.x, twist.angular.z = self.out
+        twist.linear.x, twist.angular.z = float(self.out[0]), float(self.out[1])
         self.cmd_pub.publish(twist)
         if (frame is not None and time.monotonic() - self.last_image_sent > 0.12
                 and self.image_pub.get_subscription_count() > 0):
@@ -644,6 +655,7 @@ class TagMission(Node):
             color = (0.1, 0.9, 0.1) if i in self.visited else (
                 (0.9, 0.1, 0.1) if i in self.missed else (1.0, 0.6, 0.0))
             m = marker(i, Marker.CYLINDER, 'tags')
+            x, y = float(x), float(y)
             m.pose.position.x, m.pose.position.y, m.pose.position.z = x, y, 0.1
             m.scale.x = m.scale.y = 0.15
             m.scale.z = 0.2
@@ -658,15 +670,15 @@ class TagMission(Node):
         path = marker(0, Marker.LINE_STRIP, 'plan')
         path.scale.x = 0.03
         path.color.g, path.color.b, path.color.a = 0.6, 1.0, 1.0
-        path.points.append(Point(x=self.pose[0], y=self.pose[1]))
+        path.points.append(Point(x=float(self.pose[0]), y=float(self.pose[1])))
         if self.tour and self.state in ('NAVIGATE', 'SEARCH', 'ARRIVED'):
             for leg in self.tour.legs:
-                path.points.append(Point(x=leg.stop[0], y=leg.stop[1]))
+                path.points.append(Point(x=float(leg.stop[0]), y=float(leg.stop[1])))
         arr.markers.append(path)
         robot = marker(0, Marker.ARROW, 'robot')
-        robot.pose.position.x, robot.pose.position.y = self.pose[0], self.pose[1]
-        robot.pose.orientation.z = math.sin(self.pose[2] / 2)
-        robot.pose.orientation.w = math.cos(self.pose[2] / 2)
+        robot.pose.position.x, robot.pose.position.y = float(self.pose[0]), float(self.pose[1])
+        robot.pose.orientation.z = float(math.sin(self.pose[2] / 2))
+        robot.pose.orientation.w = float(math.cos(self.pose[2] / 2))
         robot.scale.x, robot.scale.y, robot.scale.z = 0.4, 0.12, 0.12
         robot.color.r, robot.color.b, robot.color.a = 0.8, 0.8, 1.0
         arr.markers.append(robot)

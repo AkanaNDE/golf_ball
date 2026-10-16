@@ -26,6 +26,8 @@ def test_distance_and_offset_from_size():
         obs = det.detect(render_tag(5, z, x), 0.0)
         assert len(obs) == 1 and obs[0].tag_id == 5
         assert abs(obs[0].z - z) / z < 0.03, (z, obs[0].z)
+        # ROS message fields only accept Python floats (numpy.float32 crashed the node)
+        assert all(type(v) is float for v in (obs[0].z, obs[0].x, obs[0].u, obs[0].h_px))
         assert abs(obs[0].x - x) < 0.03 + 0.02 * z, (x, obs[0].x)
 
 

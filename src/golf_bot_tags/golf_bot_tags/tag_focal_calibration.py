@@ -114,8 +114,8 @@ def main(args=None):
     ap.add_argument('--size', type=float, default=0.15, help='black square side length (m)')
     ap.add_argument('--family', default='36h11')
     ap.add_argument('--camera', default='auto', help='auto, index or /dev/videoN')
-    ap.add_argument('--width', type=int, default=640)
-    ap.add_argument('--height', type=int, default=480)
+    ap.add_argument('--width', type=int, default=1280, help='use the same size as tag_mission')
+    ap.add_argument('--height', type=int, default=720)
     a, _ = ap.parse_known_args(sys.argv[1:] if args is None else args)
 
     rclpy.init(args=args)
