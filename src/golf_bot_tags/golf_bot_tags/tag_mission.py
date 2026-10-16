@@ -80,7 +80,8 @@ class TagMission(Node):
             ('exact_limit', 10),
             # control
             ('rate', 20.0), ('k_heading', 1.5), ('k_distance', 0.8), ('v_min', 0.06),
-            ('w_min', 0.25), ('turn_in_place_deg', 25.0), ('arrive_tolerance', 0.08),
+            ('w_min', 0.25), ('turn_in_place_deg', 25.0), ('align_tolerance_deg', 10.0),
+            ('align_step_deg', 45.0), ('arrive_tolerance', 0.08),
             ('lost_timeout', 0.6), ('local_search_deg', 70.0), ('dwell_time', 1.0),
             ('leg_timeout_factor', 3.0), ('relocalize_gain', 0.7),
             ('require_auto', True),
@@ -92,6 +93,7 @@ class TagMission(Node):
             ('sim_noise', 0.03),
             ('sim_blur_speed', 0.2),         # rad/s: faster turning gives blurred (useless) frames
             ('sim_min_turn_rate', 0.0),      # rad/s: commanded turns below this do not move
+            ('sim_yaw_scale_fast', -1.0),    # true/commanded yaw for |w| > 0.5 (-1 = same)
             ('sim_visual_noise_deg', 0.7),   # noise of the simulated visual yaw per stop
             ('sim_render', False),           # render tag images + run the real detector
         ])
@@ -100,8 +102,9 @@ class TagMission(Node):
             'camera_offset', 'camera_latency', 'pose_source', 'yaw_scale', 'linear_scale',
             'scan_speed', 'scan_extra_deg', 'scan_max_deg', 'scan_mode', 'scan_step_deg',
             'scan_settle_time', 'scan_look_time', 'scan_visual_yaw', 'scan_speed_max',
-            'sim_min_turn_rate', 'sim_visual_noise_deg', 'k_heading', 'k_distance', 'v_min',
-            'w_min', 'turn_in_place_deg', 'arrive_tolerance', 'lost_timeout',
+            'sim_min_turn_rate', 'sim_visual_noise_deg', 'sim_yaw_scale_fast', 'k_heading', 'k_distance', 'v_min',
+            'w_min', 'turn_in_place_deg', 'align_tolerance_deg', 'align_step_deg',
+            'arrive_tolerance', 'lost_timeout',
             'local_search_deg', 'dwell_time', 'leg_timeout_factor', 'relocalize_gain',
             'require_auto', 'exact_limit', 'simulate', 'sim_yaw_scale', 'start_delay',
             'accel_linear', 'accel_angular']}
@@ -120,6 +123,7 @@ class TagMission(Node):
         self.vel = (0.0, 0.0)
         self.vel_time = 0.0
         self.travelled = 0.0
+        self.yaw_odom_total = 0.0
         self.turn_deadband = 0.0       # rad/s: turning in place below this does not move (learned)
         self.w_turn_min = self.p['w_min']  # rad/s: smallest turn-in-place command that works
 
@@ -269,6 +273,8 @@ class TagMission(Node):
             w = 0.0  # learned: too weak to turn the robot in place
         if self.p['simulate']:  # the "real" robot under-rotates by sim_yaw_scale
             tw = w * self.p['sim_yaw_scale']
+            if self.p['sim_yaw_scale_fast'] >= 0 and abs(w) > 0.5:  # non-linear motor response
+                tw = w * self.p['sim_yaw_scale_fast']
             if abs(v) < 0.02 and abs(w) < self.p['sim_min_turn_rate']:
                 tw = 0.0                   # too weak to overcome skid-steer friction
             self.truth_rate = tw
@@ -286,6 +292,7 @@ class TagMission(Node):
             self.scan_turned += w * self.dt
             self.scan_history.push(now, (self.pose[0], self.pose[1], self.scan_turned))
         self.travelled += abs(v) * self.dt
+        self.yaw_odom_total += w * self.dt   # unwrapped dead-reckoned yaw
         self.history.push(now, tuple(self.pose))
 
     def new_observations(self):
@@ -538,7 +545,96 @@ class TagMission(Node):
         self.leg_start = time.monotonic()
         self.leg_budget = self.p['leg_timeout_factor'] * leg.time + 10.0
         self.search_turned = 0.0
-        self.set_state('NAVIGATE', f'-> tag {self.target}')
+        self.start_align(f'-> tag {self.target}')
+
+    # ALIGN -------------------------------------------------------------------
+    def start_align(self, note=''):
+        """Turn toward the target in steps whose real angle is measured from the images.
+
+        Dead-reckoned turns are unreliable (skid steer slips differently at each turn rate,
+        and the motor response is not linear), so a wrong heading would send the robot the
+        wrong way. Each step: stand still -> keyframe -> turn -> stand still -> measure the
+        real turn visually -> correct the heading. Repeat until facing the target or seeing it.
+        """
+        self.align_phase = 'settle'
+        self.align_phase_time = time.monotonic()
+        self.align_iter = 0
+        self.align_kf = None
+        self.set_state('ALIGN', note)
+
+    def capture_keyframe(self):
+        if self.p['simulate']:
+            return {'sim': self.truth_turned}
+        if self.latest_frame is None:
+            return None
+        return {'kf': self.rotation.keyframe(self.latest_frame), 'w': self.latest_frame.shape[1]}
+
+    def visual_turn(self, kf_a, kf_b):
+        """Real turn (rad, left +) between two keyframes, or None if not measurable."""
+        if kf_a is None or kf_b is None:
+            return None
+        if 'sim' in kf_a:
+            return kf_b['sim'] - kf_a['sim']
+        turn, _ = self.rotation.turn(kf_a['kf'], kf_b['kf'], self.detector.focal(kf_b['w']))
+        return turn
+
+    def step_align(self, obs, pose):
+        now = time.monotonic()
+        sharp = pose is not None and self.frame_stamp >= self.align_phase_time - self.p['camera_latency']
+        if self.align_phase == 'settle':          # come to rest before looking
+            if now - self.align_phase_time >= self.p['scan_settle_time']:
+                self.align_phase, self.align_phase_time = 'look', now
+            return (0.0, 0.0)
+
+        if self.align_phase == 'look':
+            if not sharp:
+                return (0.0, 0.0)
+            kf = self.capture_keyframe()
+            if self.align_kf is not None:          # finish the previous step: measure it
+                real = self.visual_turn(self.align_kf, kf)
+                est = self.yaw_odom_total - self.align_odom0
+                if real is not None:
+                    self.pose[2] = wrap(self.align_yaw0 + real)
+                    if abs(est) > math.radians(5) and abs(real) > math.radians(2):
+                        ratio = clamp(real / est, 0.3, 3.0)
+                        self.yaw_scale *= 1.0 + 0.5 * (ratio - 1.0)   # learn, gently
+                    if abs(real) < math.radians(2):
+                        self.w_turn_min = min(self.w_turn_min * 1.3, self.p['scan_speed_max'])
+                        self.get_logger().warn(f'Align: robot did not turn, turn command now '
+                                               f'>= {self.w_turn_min:.2f} rad/s')
+                    self.get_logger().info(
+                        f'Align step: turned {math.degrees(real):+.1f} deg real '
+                        f'(estimate {math.degrees(est):+.1f}), heading corrected')
+            self.align_kf = kf
+            self.align_yaw0 = self.pose[2]
+            self.align_odom0 = self.yaw_odom_total
+            if self.visible(self.target) is not None:
+                self.set_state('NAVIGATE', f'tag {self.target} in view')
+                return (0.0, 0.0)
+            dist, bearing, _ = self.relative_target()
+            self.align_iter += 1
+            tx, ty = self.target_position()
+            self.get_logger().info(
+                f'Align: tag {self.target} at map ({tx:+.2f}, {ty:+.2f}), robot ({self.pose[0]:+.2f}, '
+                f'{self.pose[1]:+.2f}) heading {math.degrees(self.pose[2]):+.0f} deg -> turn '
+                f'{math.degrees(bearing):+.0f} deg ({"left" if bearing > 0 else "right"})')
+            if abs(bearing) < math.radians(self.p['align_tolerance_deg']) or self.align_iter > 8:
+                self.set_state('NAVIGATE', f'facing tag {self.target}')
+                return (0.0, 0.0)
+            step = clamp(bearing, -math.radians(self.p['align_step_deg']),
+                         math.radians(self.p['align_step_deg']))
+            self.align_goal = self.yaw_odom_total + step
+            self.align_dir = 1.0 if step > 0 else -1.0
+            self.align_phase = 'turn'
+            return (0.0, 0.0)
+
+        # turn: until dead reckoning says the step is done, then settle and measure
+        remaining = self.align_dir * (self.align_goal - self.yaw_odom_total)
+        if remaining <= 0:
+            self.align_phase, self.align_phase_time = 'settle', now
+            return (0.0, 0.0)
+        w = max(self.w_turn_min, min(self.model.w_max, self.p['k_heading'] * remaining))
+        return (0.0, self.align_dir * w)
 
     def target_position(self):
         return self.tag_map.tags().get(self.target, self.positions[self.ids.index(self.target)])
@@ -578,6 +674,9 @@ class TagMission(Node):
                 return (0.0, 0.0)
             self.search_turned = 0.0
             self.set_state('SEARCH', f'tag {self.target} not visible at its map position')
+            return (0.0, 0.0)
+        if not seen and abs(bearing) > math.radians(self.p['turn_in_place_deg']):
+            self.start_align(f'tag {self.target} is {math.degrees(bearing):+.0f} deg off')
             return (0.0, 0.0)
         return self.drive_to(dist, bearing)
 
@@ -671,7 +770,7 @@ class TagMission(Node):
         path.scale.x = 0.03
         path.color.g, path.color.b, path.color.a = 0.6, 1.0, 1.0
         path.points.append(Point(x=float(self.pose[0]), y=float(self.pose[1])))
-        if self.tour and self.state in ('NAVIGATE', 'SEARCH', 'ARRIVED'):
+        if self.tour and self.state in ('ALIGN', 'NAVIGATE', 'SEARCH', 'ARRIVED'):
             for leg in self.tour.legs:
                 path.points.append(Point(x=float(leg.stop[0]), y=float(leg.stop[1])))
         arr.markers.append(path)

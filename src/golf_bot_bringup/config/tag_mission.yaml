@@ -48,6 +48,8 @@ tag_mission:
     v_min: 0.06
     w_min: 0.25               # skid steer needs some minimum turn rate to move at all
     turn_in_place_deg: 25.0   # turn in place first if the tag is further off than this
+    align_tolerance_deg: 10.0 # visual align: done when facing the tag within this
+    align_step_deg: 45.0      # visual align: largest turn between two image checks
     arrive_tolerance: 0.08    # m
     lost_timeout: 0.6         # s, a tag counts as visible this long after last detection
     local_search_deg: 70.0    # sweep +/- this when a tag is not where the map says
