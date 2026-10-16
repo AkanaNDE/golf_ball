@@ -114,7 +114,7 @@ class TagMission(Node):
         self.pose = [0.0, 0.0, 0.0]
         self.truth = [0.0, 0.0, 0.0]
         self.truth_turned = 0.0        # simulated true yaw, unwrapped
-        self.last_image = None         # newest camera frame (for visual yaw)
+        self.latest_frame = None       # newest camera frame (for visual yaw)
         self.rotation = RotationEstimator()
         self.vel = (0.0, 0.0)
         self.vel_time = 0.0
@@ -142,7 +142,7 @@ class TagMission(Node):
                 f'Camera {cam}, tag {g("tag_family")} {g("tag_size") * 100:.1f} cm, '
                 f'focal {detector.focal(g("width")):.0f} px')
         self.last_frame = -1
-        self.last_image = 0.0
+        self.last_image_sent = 0.0     # time the last JPEG was published
 
         # ROS interfaces
         self.cmd_pub = self.create_publisher(Twist, 'cmd_vel_auto', 10)
@@ -292,7 +292,7 @@ class TagMission(Node):
         self.integrate()
         obs, pose, frame = self.new_observations()
         if frame is not None:
-            self.last_image = frame
+            self.latest_frame = frame
         if obs:
             self.latest_obs = (time.monotonic(), {o.tag_id: o for o in obs})
         if self.state == 'IDLE' and not self.p['require_auto'] and not self.stopped:
@@ -314,9 +314,9 @@ class TagMission(Node):
         twist = Twist()
         twist.linear.x, twist.angular.z = self.out
         self.cmd_pub.publish(twist)
-        if (frame is not None and time.monotonic() - self.last_image > 0.12
+        if (frame is not None and time.monotonic() - self.last_image_sent > 0.12
                 and self.image_pub.get_subscription_count() > 0):
-            self.last_image = time.monotonic()  # ~8 FPS max over WiFi
+            self.last_image_sent = time.monotonic()  # ~8 FPS max over WiFi
             self.publish_image(frame, obs)
 
     def ramp(self, current, target, accel):
@@ -419,12 +419,12 @@ class TagMission(Node):
                 how = 'visual(sim)'
             self.scan_kf = True
             self.scan_truth_at_kf = self.truth_turned
-        elif self.last_image is not None:
-            kf = self.rotation.keyframe(self.last_image)
+        elif self.latest_frame is not None:
+            kf = self.rotation.keyframe(self.latest_frame)
             if self.scan_kf is not None and self.p['scan_visual_yaw']:
-                f = self.detector.focal(self.last_image.shape[1])
-                turn, n = self.rotation.turn(self.scan_kf, kf, f)
-                how = f'visual({n} matches)' if turn is not None else f'odometry (only {n} matches)'
+                f = self.detector.focal(self.latest_frame.shape[1])
+                turn, info = self.rotation.turn(self.scan_kf, kf, f)
+                how = f'visual: {info}' if turn is not None else f'odometry (image: {info})'
             self.scan_kf = kf
         else:
             return  # no image yet

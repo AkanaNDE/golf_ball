@@ -144,9 +144,23 @@ def test_visual_rotation_estimate():
     scene = textured_scene()
     kf0 = est.keyframe(scene)
     for deg in (5, 13, 30, -20):
-        turn, n = est.turn(kf0, est.keyframe(rotated_view(scene, math.radians(deg), f)), f)
-        assert turn is not None and n >= 15, (deg, n)
-        assert abs(math.degrees(turn) - deg) < 1.0, (deg, math.degrees(turn))
+        turn, info = est.turn(kf0, est.keyframe(rotated_view(scene, math.radians(deg), f)), f)
+        assert turn is not None, (deg, info)
+        assert abs(math.degrees(turn) - deg) < 1.0, (deg, math.degrees(turn), info)
     # no texture -> no estimate instead of a wrong one
     blank = np.full((480, 640, 3), 128, np.uint8)
     assert est.turn(est.keyframe(blank), est.keyframe(blank), f)[0] is None
+
+
+def test_phase_correlation_on_dull_blurry_scene():
+    """Low-contrast, blurred scene (like a plain wall): the cylinder phase method still works."""
+    from golf_bot_tags.tag_vision import RotationEstimator
+    est = RotationEstimator()
+    f = 457.0
+    scene = cv2.GaussianBlur(textured_scene(seed=3), (0, 0), 6)
+    scene = cv2.addWeighted(scene, 0.25, np.full_like(scene, 128), 0.75, 0)  # low contrast
+    kf0 = est.keyframe(scene)
+    for deg in (10, 30, -25):
+        turn, resp = est._turn_phase(kf0, est.keyframe(rotated_view(scene, math.radians(deg), f)), f)
+        assert turn is not None, (deg, resp)
+        assert abs(math.degrees(turn) - deg) < 1.5, (deg, math.degrees(turn))

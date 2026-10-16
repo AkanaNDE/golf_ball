@@ -126,28 +126,37 @@ class RotationEstimator:
     """Measure how far the robot really turned between two still images (visual yaw).
 
     For a camera turning about a vertical axis, a scene point at image column u has the
-    bearing atan((u - cx) / f); after a turn of d (left positive) the same point appears
-    at bearing + d. ORB features are matched between the two images and the median
-    bearing change is the true turn - independent of wheel slip or stalled wheels.
+    bearing atan((u - cx) / f); after a turn of d (left positive) it appears at bearing + d.
+
+    1. ORB features: match descriptors, the median bearing change is the turn
+       (precise, needs some texture; low FAST threshold for plain indoor scenes).
+    2. Fallback, cylindrical phase correlation: both images are unrolled onto a cylinder
+       (column = bearing, f pixels per radian) where a pure turn is a pure horizontal
+       shift, found with cv2.phaseCorrelate over the whole image - works on blurry or
+       low-texture images where ORB finds too few corners.
+    Independent of wheel slip or stalled wheels.
     """
 
-    def __init__(self, features=1500, ratio=0.75, max_dy_px=25.0, min_matches=15,
-                 inlier_deg=2.0, min_inlier_frac=0.4):
-        self.orb = cv2.ORB_create(features)
+    def __init__(self, features=1500, ratio=0.8, max_dy_px=25.0, min_matches=12,
+                 inlier_deg=2.0, min_inlier_frac=0.35, fast_threshold=7, min_response=0.08):
+        self.orb = cv2.ORB_create(features, fastThreshold=fast_threshold)
         self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
         self.ratio = ratio
         self.max_dy = max_dy_px
         self.min_matches = min_matches
         self.inlier = math.radians(inlier_deg)
         self.min_inlier_frac = min_inlier_frac
+        self.min_response = min_response
+        self._maps = {}
 
     def keyframe(self, frame):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+        gray = cv2.equalizeHist(gray)   # more corners in dull / dark scenes
         kp, des = self.orb.detectAndCompute(gray, None)
-        return {'kp': kp, 'des': des, 'w': gray.shape[1]}
+        return {'kp': kp, 'des': des, 'w': gray.shape[1], 'gray': gray}
 
-    def turn(self, kf1, kf2, focal):
-        """(turn_rad, n_inliers) from keyframe 1 to keyframe 2, or (None, n) if unreliable."""
+    # --- 1. features -------------------------------------------------------------
+    def _turn_features(self, kf1, kf2, focal):
         if kf1['des'] is None or kf2['des'] is None or len(kf1['kp']) < 2 or len(kf2['kp']) < 2:
             return None, 0
         cx = kf1['w'] / 2.0
@@ -169,6 +178,45 @@ class RotationEstimator:
         if len(inliers) < self.min_inlier_frac * len(diffs) or len(inliers) < self.min_matches:
             return None, len(inliers)
         return sum(inliers) / len(inliers), len(inliers)
+
+    # --- 2. cylindrical phase correlation -----------------------------------------
+    def _cylinder(self, gray, focal):
+        h, w = gray.shape
+        key = (w, h, round(focal, 1))
+        if key not in self._maps:
+            half = math.atan((w / 2.0) / focal)
+            cols = int(2 * half * focal)              # f pixels per radian
+            theta = (np.arange(cols) - cols / 2.0) / focal
+            rows = np.arange(h) - h / 2.0
+            th, yy = np.meshgrid(theta, rows)
+            map_x = (w / 2.0 + focal * np.tan(th)).astype(np.float32)
+            map_y = (h / 2.0 + yy / np.cos(th)).astype(np.float32)
+            window = cv2.createHanningWindow((cols, h), cv2.CV_32F)
+            self._maps[key] = (map_x, map_y, window)
+        map_x, map_y, window = self._maps[key]
+        cyl = cv2.remap(gray, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+        return cyl.astype(np.float32), window
+
+    def _turn_phase(self, kf1, kf2, focal):
+        # a featureless image (plain wall, lens cap) has nothing to correlate
+        if min(float(kf1['gray'].std()), float(kf2['gray'].std())) < 4.0:
+            return None, 0.0
+        c1, window = self._cylinder(kf1['gray'], focal)
+        c2, _ = self._cylinder(kf2['gray'], focal)
+        (dx, dy), response = cv2.phaseCorrelate(c1, c2, window)
+        if response < self.min_response or abs(dy) > self.max_dy:
+            return None, response
+        return dx / focal, response
+
+    def turn(self, kf1, kf2, focal):
+        """(turn_rad, method_info) from keyframe 1 to keyframe 2, or (None, info)."""
+        turn, n = self._turn_features(kf1, kf2, focal)
+        if turn is not None:
+            return turn, f'{n} feature matches'
+        turn_p, resp = self._turn_phase(kf1, kf2, focal)
+        if turn_p is not None:
+            return turn_p, f'phase correlation {resp:.2f} ({n} matches)'
+        return None, f'{n} matches, phase {resp:.2f}'
 
 
 class CameraThread:
