@@ -11,7 +11,7 @@ tag_mission:
     tag_family: "36h11"       # tag36h11 / tag25h9 / tag16h5 / tag36h10
     tag_size: 0.04            # m, side of the BLACK square only (not the white border)
     focal_px: 669.3           # measured: tag_focal_calibration --distance 1.0 --size 0.04 (1280x720)
-                              # SAME width/height (focal in px scales with resolution)
+                              # re-measure if width/height change (focal in px scales with it)
     hfov_deg: 87.4            # UGREEN 2K at 1280x720 (from focal_px); only used when focal_px = 0
     camera_offset: 0.15       # m, camera in front of the robot's turning centre
     camera_latency: 0.08      # s, frame age when it is processed
