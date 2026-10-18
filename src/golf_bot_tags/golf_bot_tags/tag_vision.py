@@ -48,6 +48,34 @@ class TagObservation:
         return math.atan2(-self.x, self.z)
 
 
+def set_exposure(cap, exposure_ms=0.0, gain=-1.0, dev=None, controls=''):
+    """Short manual exposure so frames stay sharp while the robot turns.
+
+    Motion blur in pixels = turn rate (rad/s) x exposure (s) x focal (px). Indoors auto
+    exposure is often 20-33 ms: at 0.4 rad/s and f = 670 px that is 5-9 px of blur, and
+    AprilTags are lost above ~2 px. 5 ms gives ~1.3 px. Raise gain (or add light) to
+    compensate the darker image. exposure_ms <= 0 keeps auto exposure.
+    V4L2 units: exposure is in 100 us steps; AUTO_EXPOSURE 1 = manual, 3 = auto.
+    `controls` (e.g. 'auto_exposure=1,exposure_time_absolute=50') is passed to v4l2-ctl
+    for cameras whose controls OpenCV cannot set. Returns a short description.
+    """
+    notes = []
+    if exposure_ms > 0:
+        cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+        cap.set(cv2.CAP_PROP_EXPOSURE, exposure_ms * 10.0)
+        notes.append(f'exposure {cap.get(cv2.CAP_PROP_EXPOSURE) / 10.0:.1f} ms '
+                     f'(asked {exposure_ms:.1f}, auto={cap.get(cv2.CAP_PROP_AUTO_EXPOSURE):.0f})')
+    if gain >= 0:
+        cap.set(cv2.CAP_PROP_GAIN, gain)
+        notes.append(f'gain {cap.get(cv2.CAP_PROP_GAIN):.0f}')
+    if controls and dev:
+        import subprocess
+        r = subprocess.run(['v4l2-ctl', '-d', str(dev), '-c', controls],
+                           capture_output=True, text=True)
+        notes.append(f'v4l2-ctl {controls}: ' + ('ok' if r.returncode == 0 else r.stderr.strip()))
+    return ', '.join(notes) if notes else 'auto exposure'
+
+
 def open_camera(camera='auto', width=640, height=480, fourcc='MJPG'):
     """Open a V4L2 camera; 'auto' tries every /dev/video* until one returns a frame.
 
@@ -244,6 +272,7 @@ class CameraThread:
         self.detector = detector
         self.flip = flip
         self.thorough = True    # set False while the robot moves (fast detection)
+        self.restore_auto_exposure = False
         self.lock = threading.Lock()
         self.frame = None
         self.observations = []
@@ -274,6 +303,8 @@ class CameraThread:
     def stop(self):
         self.running = False
         self.thread.join(timeout=1.0)
+        if self.restore_auto_exposure:  # manual exposure would stay on the camera otherwise
+            self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
         self.cap.release()
 
 

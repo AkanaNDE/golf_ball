@@ -44,7 +44,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from golf_bot_tags.tag_map import PoseHistory, ScanCalibrator, TagMap
 from golf_bot_tags.tag_vision import (CameraThread, RotationEstimator, SimulatedCamera,
-                                      TagDetector, encode_jpeg,
+                                      TagDetector, encode_jpeg, set_exposure,
                                       open_camera)
 from golf_bot_tags.tour_planner import MotionModel, plan_tour, wrap
 
@@ -63,6 +63,9 @@ class TagMission(Node):
             ('tag_family', '36h11'), ('tag_size', 0.15),
             ('focal_px', 0.0), ('hfov_deg', 70.0),
             ('camera_offset', 0.15), ('camera_latency', 0.08),
+            ('exposure_ms', 5.0),            # manual exposure: short = sharp while turning (0 = auto)
+            ('gain', -1.0),                  # camera gain to brighten short exposures (-1 = keep)
+            ('camera_controls', ''),         # extra v4l2-ctl -c controls, if OpenCV cannot set them
             # pose estimate
             ('pose_source', 'cmd'),          # 'cmd' (/cmd_vel) or 'odom' (/odom twist)
             ('yaw_scale', 1.0), ('linear_scale', 1.0),
@@ -92,7 +95,8 @@ class TagMission(Node):
             # simulation (dry run without camera/robot)
             ('simulate', False), ('sim_tags', [0.0]), ('sim_yaw_scale', 0.85),
             ('sim_noise', 0.03),
-            ('sim_blur_speed', 0.2),         # rad/s: faster turning gives blurred (useless) frames
+            ('sim_blur_speed', -1.0),        # rad/s: blurred above this turn rate (-1: from exposure)
+            ('sim_auto_exposure_ms', 33.0),  # simulated exposure when exposure_ms is 0 (auto)
             ('sim_min_turn_rate', 0.0),      # rad/s: commanded turns below this do not move
             ('sim_yaw_scale_fast', -1.0),    # true/commanded yaw for |w| > 0.5 (-1 = same)
             ('sim_visual_noise_deg', 0.7),   # noise of the simulated visual yaw per stop
@@ -102,6 +106,7 @@ class TagMission(Node):
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         self.p = {n: g(n) for n in [
             'camera_offset', 'camera_latency', 'pose_source', 'yaw_scale', 'linear_scale',
+            'exposure_ms',
             'scan_speed', 'scan_extra_deg', 'scan_max_deg', 'scan_mode', 'scan_step_deg',
             'scan_settle_time', 'scan_look_time', 'scan_visual_yaw', 'scan_speed_max',
             'sim_min_turn_rate', 'sim_visual_noise_deg', 'sim_yaw_scale_fast', 'k_heading', 'k_distance', 'v_min',
@@ -140,7 +145,10 @@ class TagMission(Node):
             self.camera = SimulatedCamera(tags, lambda: tuple(self.truth), g('hfov_deg'),
                                           noise=g('sim_noise'), camera_offset=self.p['camera_offset'],
                                           truth_rate=lambda: self.truth_rate,
-                                          blur_speed=g('sim_blur_speed'),
+                                          blur_speed=g('sim_blur_speed') if g('sim_blur_speed') > 0
+                                          else 2.0 / ((g('exposure_ms') if g('exposure_ms') > 0
+                                                       else g('sim_auto_exposure_ms')) / 1000.0
+                                                      * (g('focal_px') or 670.0)),
                                           detector=TagDetector(g('tag_family'), g('tag_size'),
                                                                g('focal_px'), g('hfov_deg'))
                                           if g('sim_render') else None,
@@ -158,11 +166,13 @@ class TagMission(Node):
             if (real_w, real_h) != (g('width'), g('height')):
                 self.get_logger().warn(f'Camera gives {real_w}x{real_h}, not {g("width")}x'
                                        f'{g("height")} (focal is computed for the real size)')
+            exposure = set_exposure(cap, g('exposure_ms'), g('gain'), cam, g('camera_controls'))
             self.camera = CameraThread(cap, detector, g('flip'))
+            self.camera.restore_auto_exposure = g('exposure_ms') > 0
             self.get_logger().info(
                 f'Camera {cam}, tag {g("tag_family")} {g("tag_size") * 100:.1f} cm, '
                 f'{int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}, '
-                f'focal {detector.focal(int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))):.0f} px')
+                f'focal {detector.focal(int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))):.0f} px, {exposure}')
         self.last_frame = -1
         self.last_image_sent = 0.0     # time the last JPEG was published
 
@@ -218,6 +228,7 @@ class TagMission(Node):
         self.scan_ratio = 1.0          # real / odometry turn, learned during the scan
         self.scan_cmd_speed = None     # turn rate command (boosted if the robot stalls)
         self.scan_visual_ok = 0
+        self.scan_pending = []         # detections while turning, waiting for the stop's yaw
         self.ids, self.positions = [], []
         self.tour = None
         self.visited, self.missed = [], []
@@ -341,7 +352,7 @@ class TagMission(Node):
         twist.linear.x, twist.angular.z = float(self.out[0]), float(self.out[1])
         # standing still -> sharp frames: slow, thorough detection (finds small / far tags);
         # moving -> blurred frames: fast detection keeps the frame rate up
-        self.camera.thorough = abs(self.out[0]) < 1e-3 and abs(self.out[1]) < 1e-3
+        self.camera.thorough = abs(self.out[0]) < 1e-3   # not driving forward
         self.cmd_pub.publish(twist)
         if (frame is not None and time.monotonic() - self.last_image_sent > 0.12
                 and self.image_pub.get_subscription_count() > 0):
@@ -398,6 +409,9 @@ class TagMission(Node):
             self.scan_cmd_speed = abs(self.p['scan_speed'])
 
         if self.scan_phase == 'turn':
+            if obs:  # sharp enough with a short exposure: keep, yaw is filled in at the next stop
+                self.scan_pending.append((obs, self.scan_history.at(self.frame_stamp) or
+                                          (self.pose[0], self.pose[1], self.scan_turned)))
             if direction * (self.scan_turned - self.scan_target) >= 0:
                 self.scan_phase, self.scan_phase_time = 'settle', now
                 return (0.0, 0.0)
@@ -477,6 +491,16 @@ class TagMission(Node):
                                    f'turn command {self.scan_cmd_speed:.2f} -> {boosted:.2f} rad/s')
             self.turn_deadband = max(self.turn_deadband, self.scan_cmd_speed)
             self.scan_cmd_speed = boosted
+        # detections taken while turning: real yaw interpolated along this step
+        odom_prev = self.scan_odom_at_kf
+        for frame_obs, (px, py, odom_yaw) in self.scan_pending:
+            frac = clamp((odom_yaw - odom_prev) / odom_step, 0.0, 1.0) if abs(odom_step) > 1e-6 else 1.0
+            for o in frame_obs:
+                self.calib.record(o, (px, py, self.scan_true + frac * step_true))
+        if self.scan_pending:
+            n = sum(len(f) for f, _ in self.scan_pending)
+            self.get_logger().info(f'  {n} tag detection(s) while turning')
+        self.scan_pending = []
         self.scan_true += step_true
         self.scan_stop_yaw = self.scan_true
         self.scan_odom_at_kf = self.scan_turned
@@ -639,8 +663,12 @@ class TagMission(Node):
             self.align_phase = 'turn'
             return (0.0, 0.0)
 
-        # turn: until dead reckoning says the step is done, then settle and measure
+        # turn: until dead reckoning says the step is done, then settle and measure;
+        # stop early if the target appears (sharp frames while turning with short exposure)
         remaining = self.align_dir * (self.align_goal - self.yaw_odom_total)
+        if any(o.tag_id == self.target for o in obs):
+            self.get_logger().info(f'Align: tag {self.target} seen while turning, stopping')
+            remaining = 0.0
         if remaining <= 0:
             self.align_phase, self.align_phase_time = 'settle', now
             return (0.0, 0.0)

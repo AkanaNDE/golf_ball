@@ -171,7 +171,7 @@ Parameters: `src/golf_bot_bringup/config/tag_mission.yaml` (set `tag_size` to yo
 
 | Step | What happens |
 |---|---|
-| Scan | Turn in place ~405° in **30° steps: turn → stop → wait 0.5 s → look 0.7 s** (frames taken while turning are blurred and miss tags). Only sharp frames from standing still are used, each stored with the pose at frame time. |
+| Scan | Turn in place ~405° in **30° steps: turn → stop → wait 0.5 s → look 1 s**. The camera runs a **short manual exposure** (`exposure_ms: 5`): blur = turn rate × exposure × focal, so at 0.4 rad/s auto exposure (~33 ms) smears a tag over ~9 px and it is lost, 5 ms gives ~1.3 px and tags are also detected **while turning** (their yaw is interpolated between the visually measured stops). |
 | Visual yaw | The real turn between two stops is measured from the images: ORB features are matched and the median change of their bearing `atan((u−cx)/f)` is the turn. The scan stops after 360°+ of **real** rotation even if the wheels slip (the robot turned 225° while odometry said 526°) or stall; a stalled step raises the turn command, and the learned real/commanded ratio and minimum turn rate are used for the rest of the mission. |
 | Calibrate | Visual loop closure: a tag seen at stop A is seen again one *real* revolution later at stop B, so `scale = (360° + bearing_A − bearing_B) / turn(A→B)` fine-tunes the visual yaw (or calibrates odometry if the scene has no texture). (`scan_mode: continuous` uses centre crossings instead.) |
 | Map | Distance `Z = f·tag_size / h_px` with `h_px` = mean of the two *vertical* edges (unchanged when the tag is turned). Observations are fused per tag with inverse-variance weights (σ ∝ Z/h_px, more at image edges); a tag needs ≥3 detections. |
