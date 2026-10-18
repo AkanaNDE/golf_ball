@@ -81,7 +81,8 @@ class TagMission(Node):
             # control
             ('rate', 20.0), ('k_heading', 1.5), ('k_distance', 0.8), ('v_min', 0.06),
             ('w_min', 0.25), ('turn_in_place_deg', 25.0), ('align_tolerance_deg', 10.0),
-            ('align_step_deg', 45.0), ('arrive_tolerance', 0.08),
+            ('align_step_deg', 45.0), ('approach_step', 0.4), ('approach_look_time', 1.0),
+            ('approach_turn_deg', 6.0), ('approach_blind_steps', 6), ('arrive_tolerance', 0.08),
             ('lost_timeout', 0.6), ('local_search_deg', 70.0), ('dwell_time', 1.0),
             ('leg_timeout_factor', 3.0), ('relocalize_gain', 0.7),
             ('require_auto', True),
@@ -96,6 +97,7 @@ class TagMission(Node):
             ('sim_yaw_scale_fast', -1.0),    # true/commanded yaw for |w| > 0.5 (-1 = same)
             ('sim_visual_noise_deg', 0.7),   # noise of the simulated visual yaw per stop
             ('sim_render', False),           # render tag images + run the real detector
+            ('sim_blur_linear', 0.0),        # m/s: frames blurred when driving faster than this
         ])
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         self.p = {n: g(n) for n in [
@@ -104,6 +106,8 @@ class TagMission(Node):
             'scan_settle_time', 'scan_look_time', 'scan_visual_yaw', 'scan_speed_max',
             'sim_min_turn_rate', 'sim_visual_noise_deg', 'sim_yaw_scale_fast', 'k_heading', 'k_distance', 'v_min',
             'w_min', 'turn_in_place_deg', 'align_tolerance_deg', 'align_step_deg',
+            'approach_step', 'approach_look_time', 'approach_turn_deg', 'approach_blind_steps',
+            'sim_blur_linear',
             'arrive_tolerance', 'lost_timeout',
             'local_search_deg', 'dwell_time', 'leg_timeout_factor', 'relocalize_gain',
             'require_auto', 'exact_limit', 'simulate', 'sim_yaw_scale', 'start_delay',
@@ -118,6 +122,7 @@ class TagMission(Node):
         self.pose = [0.0, 0.0, 0.0]
         self.truth = [0.0, 0.0, 0.0]
         self.truth_turned = 0.0        # simulated true yaw, unwrapped
+        self.truth_speed = 0.0
         self.latest_frame = None       # newest camera frame (for visual yaw)
         self.rotation = RotationEstimator()
         self.vel = (0.0, 0.0)
@@ -140,6 +145,8 @@ class TagMission(Node):
                                                                g('focal_px'), g('hfov_deg'))
                                           if g('sim_render') else None,
                                           width=g('width'), height=g('height'))
+            self.camera.truth_speed = lambda: self.truth_speed
+            self.camera.blur_linear = g('sim_blur_linear')
             self.get_logger().info(f'SIMULATION: {len(tags)} tags {tags}, true yaw scale '
                                    f'{self.p["sim_yaw_scale"]}')
         else:
@@ -278,6 +285,7 @@ class TagMission(Node):
             if abs(v) < 0.02 and abs(w) < self.p['sim_min_turn_rate']:
                 tw = 0.0                   # too weak to overcome skid-steer friction
             self.truth_rate = tw
+            self.truth_speed = v
             self.truth_turned += tw * self.dt
             self.truth[0] += v * math.cos(self.truth[2] + tw * self.dt / 2) * self.dt
             self.truth[1] += v * math.sin(self.truth[2] + tw * self.dt / 2) * self.dt
@@ -331,6 +339,9 @@ class TagMission(Node):
             self.out = (0.0, 0.0)  # paused / stopped / done: stop at once
         twist = Twist()
         twist.linear.x, twist.angular.z = float(self.out[0]), float(self.out[1])
+        # standing still -> sharp frames: slow, thorough detection (finds small / far tags);
+        # moving -> blurred frames: fast detection keeps the frame rate up
+        self.camera.thorough = abs(self.out[0]) < 1e-3 and abs(self.out[1]) < 1e-3
         self.cmd_pub.publish(twist)
         if (frame is not None and time.monotonic() - self.last_image_sent > 0.12
                 and self.image_pub.get_subscription_count() > 0):
@@ -609,7 +620,7 @@ class TagMission(Node):
             self.align_yaw0 = self.pose[2]
             self.align_odom0 = self.yaw_odom_total
             if self.visible(self.target) is not None:
-                self.set_state('NAVIGATE', f'tag {self.target} in view')
+                self.start_navigate(f'tag {self.target} in view')
                 return (0.0, 0.0)
             dist, bearing, _ = self.relative_target()
             self.align_iter += 1
@@ -619,7 +630,7 @@ class TagMission(Node):
                 f'{self.pose[1]:+.2f}) heading {math.degrees(self.pose[2]):+.0f} deg -> turn '
                 f'{math.degrees(bearing):+.0f} deg ({"left" if bearing > 0 else "right"})')
             if abs(bearing) < math.radians(self.p['align_tolerance_deg']) or self.align_iter > 8:
-                self.set_state('NAVIGATE', f'facing tag {self.target}')
+                self.start_navigate(f'facing tag {self.target}')
                 return (0.0, 0.0)
             step = clamp(bearing, -math.radians(self.p['align_step_deg']),
                          math.radians(self.p['align_step_deg']))
@@ -651,34 +662,104 @@ class TagMission(Node):
         dx, dy = tx - self.pose[0], ty - self.pose[1]
         return math.hypot(dx, dy), wrap(math.atan2(dy, dx) - self.pose[2]), False
 
-    def drive_to(self, dist, bearing):
-        remaining = dist - self.model.standoff
-        w = clamp(self.p['k_heading'] * bearing, -self.model.w_max, self.model.w_max)
-        if abs(bearing) > math.radians(self.p['turn_in_place_deg']):
-            if abs(w) < self.w_turn_min:
-                w = math.copysign(self.w_turn_min, w)
-            return (0.0, w)
-        v = clamp(self.p['k_distance'] * remaining, self.p['v_min'], self.model.v_max)
-        return (v * math.cos(bearing), w)
+    def start_navigate(self, note=''):
+        self.nav_phase = 'settle'
+        self.nav_phase_time = time.monotonic()
+        self.nav_blind = 0
+        self.nav_seen = []
+        self.set_state('NAVIGATE', note)
 
     def step_navigate(self, obs, pose):
-        for o in obs:  # keep refining the map with everything in view (lower weight)
-            self.tag_map.add(o, pose, weight=0.3)
+        """Stop-and-go approach: look (still, sharp) -> turn or drive <= approach_step -> look.
+
+        Frames taken while driving are motion-blurred and small tags are lost, so the target
+        is only measured while standing still (thorough detection). A short dead-reckoned
+        move between looks cannot go far wrong.
+        """
         if time.monotonic() - self.leg_start > self.leg_budget:
             return self.skip_target('leg timeout')
-        dist, bearing, seen = self.relative_target()
-        if dist - self.model.standoff <= self.p['arrive_tolerance']:
+        now = time.monotonic()
+        sharp = pose is not None and self.frame_stamp >= self.nav_phase_time - self.p['camera_latency']
+
+        if self.nav_phase == 'settle':
+            if now - self.nav_phase_time >= self.p['scan_settle_time']:
+                self.nav_phase, self.nav_phase_time, self.nav_seen = 'look', now, []
+            return (0.0, 0.0)
+
+        if self.nav_phase == 'look':
+            if sharp:
+                for o in obs:
+                    self.tag_map.add(o, pose, weight=0.3)
+                    if o.tag_id == self.target:
+                        self.nav_seen.append(o)
+            enough = len(self.nav_seen) >= 2
+            if not enough and now - self.nav_phase_time < self.p['approach_look_time']:
+                return (0.0, 0.0)
+            return self.plan_approach_step()
+
+        if self.nav_phase == 'turn':
+            remaining = self.nav_dir * (self.nav_goal - self.yaw_odom_total)
+            if remaining <= 0:
+                self.nav_phase, self.nav_phase_time = 'settle', now
+                return (0.0, 0.0)
+            w = max(self.w_turn_min, min(self.model.w_max, self.p['k_heading'] * remaining))
+            return (0.0, self.nav_dir * w)
+
+        # drive: straight, holding the heading, for the planned segment
+        done = self.travelled - self.nav_start_travel
+        remaining = self.nav_segment - done
+        if remaining <= 0:
+            self.nav_phase, self.nav_phase_time = 'settle', now
+            return (0.0, 0.0)
+        v = clamp(self.p['k_distance'] * remaining + self.p['v_min'], self.p['v_min'],
+                  self.model.v_max)
+        w = clamp(self.p['k_heading'] * wrap(self.nav_heading - self.pose[2]),
+                  -self.model.w_max, self.model.w_max)
+        return (v, w)
+
+    def plan_approach_step(self):
+        """After a look: arrive, turn toward the tag, or drive a short segment."""
+        now = time.monotonic()
+        if self.nav_seen:   # measured from sharp frames: average them
+            fwd = sum(self.p['camera_offset'] + o.z for o in self.nav_seen) / len(self.nav_seen)
+            left = sum(-o.x for o in self.nav_seen) / len(self.nav_seen)
+            dist, bearing, seen = math.hypot(fwd, left), math.atan2(left, fwd), True
+            self.nav_blind = 0
+            self.latest_obs = (now, {self.target: self.nav_seen[-1]})  # for relocalize()
+        else:
+            dist, bearing, seen = self.relative_target()
+            self.nav_blind += 1
+        remaining = dist - self.model.standoff
+        self.get_logger().info(
+            f'Approach tag {self.target}: {dist:.2f} m, {math.degrees(bearing):+.0f} deg '
+            f'({"seen" if seen else "map, not seen"})')
+
+        if remaining <= self.p['arrive_tolerance']:
             if seen:
                 self.relocalize()
                 self.set_state('ARRIVED', f'tag {self.target} at {dist:.2f} m')
+            else:
+                self.search_turned = 0.0
+                self.set_state('SEARCH', f'tag {self.target} not visible at its map position')
+            return (0.0, 0.0)
+        if not seen:
+            if abs(bearing) > math.radians(self.p['turn_in_place_deg']):
+                self.start_align(f'tag {self.target} is {math.degrees(bearing):+.0f} deg off')
                 return (0.0, 0.0)
-            self.search_turned = 0.0
-            self.set_state('SEARCH', f'tag {self.target} not visible at its map position')
+            if self.nav_blind > self.p['approach_blind_steps']:
+                self.search_turned = 0.0
+                self.set_state('SEARCH', f'tag {self.target} not seen for {self.nav_blind} looks')
+                return (0.0, 0.0)
+        if abs(bearing) > math.radians(self.p['approach_turn_deg']):
+            self.nav_goal = self.yaw_odom_total + bearing
+            self.nav_dir = 1.0 if bearing > 0 else -1.0
+            self.nav_phase, self.nav_phase_time = 'turn', now
             return (0.0, 0.0)
-        if not seen and abs(bearing) > math.radians(self.p['turn_in_place_deg']):
-            self.start_align(f'tag {self.target} is {math.degrees(bearing):+.0f} deg off')
-            return (0.0, 0.0)
-        return self.drive_to(dist, bearing)
+        self.nav_segment = min(remaining, self.p['approach_step'])
+        self.nav_start_travel = self.travelled
+        self.nav_heading = wrap(self.pose[2] + bearing)
+        self.nav_phase, self.nav_phase_time = 'drive', now
+        return (0.0, 0.0)
 
     def relocalize(self):
         o = self.visible(self.target)
@@ -699,7 +780,7 @@ class TagMission(Node):
     def step_search(self, obs, pose):
         """Sweep left by local_search_deg, then right by 2x, looking for the target."""
         if self.visible(self.target) is not None:
-            self.set_state('NAVIGATE', f'found tag {self.target}')
+            self.start_navigate(f'found tag {self.target}')
             return (0.0, 0.0)
         limit = math.radians(self.p['local_search_deg'])
         speed = max(self.w_turn_min, 0.5 * self.model.w_max)

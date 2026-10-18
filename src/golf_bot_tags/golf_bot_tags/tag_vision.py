@@ -90,12 +90,22 @@ def focal_from_hfov(width, hfov_deg):
 
 
 class TagDetector:
+    """Two detection modes (measured on 1280x720 with 4 cm tags):
+      fast      SUBPIX corners, ~4 ms/frame, tags up to ~1.0 m   -> while the robot moves
+      thorough  AprilTag quad detection, ~130 ms/frame (laptop), up to ~1.5 m -> when still
+    Moving frames are blurred anyway, so the slow mode is only worth it when standing still.
+    """
+
     def __init__(self, family='36h11', tag_size=0.15, focal_px=0.0, hfov_deg=70.0,
                  min_side_px=12.0):
         self.dictionary = cv2.aruco.getPredefinedDictionary(FAMILIES[family])
-        params = cv2.aruco.DetectorParameters()
-        params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_APRILTAG
-        self.detector = cv2.aruco.ArucoDetector(self.dictionary, params)
+        fast = cv2.aruco.DetectorParameters()
+        fast.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+        thorough = cv2.aruco.DetectorParameters()
+        thorough.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_APRILTAG
+        self.fast = cv2.aruco.ArucoDetector(self.dictionary, fast)
+        self.thorough = cv2.aruco.ArucoDetector(self.dictionary, thorough)
+        self.detector = self.thorough
         self.tag_size = tag_size
         self.focal_px = focal_px
         self.hfov_deg = hfov_deg
@@ -104,11 +114,11 @@ class TagDetector:
     def focal(self, width):
         return self.focal_px if self.focal_px > 0 else focal_from_hfov(width, self.hfov_deg)
 
-    def detect(self, frame, stamp):
+    def detect(self, frame, stamp, thorough=True):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
         h, w = gray.shape[:2]
         f = self.focal(w)
-        corners, ids, _ = self.detector.detectMarkers(gray)
+        corners, ids, _ = (self.thorough if thorough else self.fast).detectMarkers(gray)
         observations = []
         if ids is None:
             return observations
@@ -233,6 +243,7 @@ class CameraThread:
         self.cap = cap
         self.detector = detector
         self.flip = flip
+        self.thorough = True    # set False while the robot moves (fast detection)
         self.lock = threading.Lock()
         self.frame = None
         self.observations = []
@@ -251,7 +262,7 @@ class CameraThread:
                 continue
             if self.flip:
                 frame = cv2.rotate(frame, cv2.ROTATE_180)
-            obs = self.detector.detect(frame, stamp)
+            obs = self.detector.detect(frame, stamp, self.thorough)
             with self.lock:
                 self.frame, self.observations, self.stamp = frame, obs, stamp
                 self.frames += 1
@@ -284,6 +295,9 @@ class SimulatedCamera:
         self.detector = detector
         self.width, self.height = width, height
         self.frame = None
+        self.thorough = True
+        self.truth_speed = None      # true forward speed (m/s), for forward-motion blur
+        self.blur_linear = 0.0
         self.truth_pose = truth_pose
         self.truth_rate = truth_rate
         self.blur_speed = blur_speed
@@ -308,6 +322,8 @@ class SimulatedCamera:
             obs = []
             blurred = (self.blur_speed > 0 and self.truth_rate is not None
                        and abs(self.truth_rate()) > self.blur_speed)
+            blurred = blurred or (self.blur_linear > 0 and self.truth_speed is not None
+                                  and abs(self.truth_speed()) > self.blur_linear)
             for tag_id, (tx, ty) in ({} if blurred else self.tags).items():
                 dx, dy = tx - cx, ty - cy
                 fwd = dx * math.cos(yaw) + dy * math.sin(yaw)
@@ -324,7 +340,7 @@ class SimulatedCamera:
             frame = None
             if self.detector is not None:
                 frame = self._render(obs)
-                obs = self.detector.detect(frame, time.monotonic())
+                obs = self.detector.detect(frame, time.monotonic(), self.thorough)
             with self.lock:
                 self.observations, self.stamp, self.frame = obs, time.monotonic(), frame
                 self.frames += 1
