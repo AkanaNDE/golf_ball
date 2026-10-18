@@ -73,6 +73,7 @@ class TagMission(Node):
             ('scan_mode', 'step'),           # step: turn-stop-look (sharp images) | continuous
             ('scan_speed', 0.4), ('scan_extra_deg', 45.0), ('scan_max_deg', 540.0),
             ('scan_step_deg', 30.0),         # turn this much between stops (< camera FOV)
+            ('scan_step_time', 2.5),         # s: turn for a fixed time per step (0 = by angle)
             ('scan_settle_time', 0.5),       # s to wait after stopping (robot stops shaking)
             ('scan_look_time', 0.7),         # s of sharp frames collected at each stop
             ('scan_visual_yaw', True),       # measure the real turn between stops from the image
@@ -87,7 +88,7 @@ class TagMission(Node):
             ('align_step_deg', 45.0), ('approach_step', 0.4), ('approach_look_time', 1.0),
             ('approach_turn_deg', 6.0), ('approach_blind_steps', 6),
             ('confirm_distance', 0.5),       # m before the standoff point: stop once to look
-            ('turn_track', True),            # stop turns on the angle measured from the images
+            ('turn_track', False),           # stop turns on the angle measured from the images
             ('turn_track_period', 0.15),     # s between image measurements while turning
             ('turn_stop_lag', 0.15),         # s: stop this early (robot keeps turning a bit)
             ('arrive_tolerance', 0.08),
@@ -114,6 +115,7 @@ class TagMission(Node):
             'exposure_ms',
             'scan_speed', 'scan_extra_deg', 'scan_max_deg', 'scan_mode', 'scan_step_deg',
             'scan_settle_time', 'scan_look_time', 'scan_visual_yaw', 'scan_speed_max',
+            'scan_step_time',
             'sim_min_turn_rate', 'sim_visual_noise_deg', 'sim_yaw_scale_fast', 'k_heading', 'k_distance', 'v_min',
             'w_min', 'turn_in_place_deg', 'align_tolerance_deg', 'align_step_deg',
             'approach_step', 'approach_look_time', 'approach_turn_deg', 'approach_blind_steps',
@@ -219,7 +221,7 @@ class TagMission(Node):
         self.calib.yaw0 = 0.0          # the scan starts at the map origin, facing +x
         self.scan_turned = 0.0         # unwrapped yaw turned during the scan
         self.scan_history = PoseHistory()
-        self.scan_phase = 'turn'       # stop-and-go: turn -> settle -> look
+        self.scan_phase = 'settle'     # stop-and-go: (settle -> look -> turn) repeated
         self.scan_stop = 0             # index of the current stop
         self.scan_target = 0.0         # unwrapped yaw where the next stop is
         self.scan_phase_time = 0.0
@@ -426,8 +428,11 @@ class TagMission(Node):
             if obs:  # sharp enough with a short exposure: keep, yaw is filled in at the next stop
                 self.scan_pending.append((obs, self.scan_history.at(self.frame_stamp) or
                                           (self.pose[0], self.pose[1], self.scan_turned)))
-            done = self.turn_finished(self.scan_cmd_speed,
-                                      direction * (self.scan_turned - self.scan_target) >= 0)
+            if self.p['scan_step_time'] > 0:   # open loop: fixed turning time per step
+                done = now - self.scan_phase_time >= self.p['scan_step_time']
+            else:
+                done = self.turn_finished(self.scan_cmd_speed,
+                                          direction * (self.scan_turned - self.scan_target) >= 0)
             if done == 'stalled':
                 self.scan_cmd_speed = self.boost_turn(self.scan_cmd_speed)
             elif done:
@@ -466,7 +471,7 @@ class TagMission(Node):
         self.scan_stop += 1
         # odometry turn that should give a real turn of `step`
         self.scan_target = self.scan_turned + direction * step / max(self.scan_ratio, 0.2)
-        self.scan_phase = 'turn'
+        self.scan_phase, self.scan_phase_time = 'turn', now
         self.start_turn_track(direction * step)
         return (0.0, 0.0)
 

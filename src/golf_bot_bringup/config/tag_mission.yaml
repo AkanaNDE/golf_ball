@@ -30,7 +30,9 @@ tag_mission:
 
     # --- scan ----------------------------------------------------------------------
     scan_mode: step           # step: turn -> stop -> look (sharp images) | continuous
-    scan_step_deg: 30.0       # turn between stops; keep well below the camera FOV (~70)
+    scan_step_time: 2.5       # s: each scan step turns for this long (~30 deg on the robot);
+                              # 0 = turn by angle (scan_step_deg) instead
+    scan_step_deg: 30.0       # only used when scan_step_time = 0
     scan_settle_time: 0.5     # s to wait after stopping before looking (robot stops rocking)
     scan_look_time: 1.0       # s of frames at each stop (thorough detection is slow: ~0.1-0.4 s/frame)
     scan_speed: 0.4           # rad/s while turning, + = counter-clockwise
@@ -60,7 +62,7 @@ tag_mission:
     approach_step: 0.4        # m per step once the tag is seen (camera-guided final approach)
     approach_look_time: 1.0   # s max looking at each approach stop (thorough detection)
     approach_turn_deg: 6.0    # turn toward the tag first if it is further off than this
-    turn_track: true          # stop every turn on the angle MEASURED from the camera while
+    turn_track: false         # true: stop every turn on the angle MEASURED from the camera while
                               # turning (not on the command), then set the heading from it
     turn_track_period: 0.15   # s between image measurements while turning
     turn_stop_lag: 0.15       # s: initial guess how long the robot keeps turning after the stop
