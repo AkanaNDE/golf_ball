@@ -85,7 +85,9 @@ class TagMission(Node):
             ('rate', 20.0), ('k_heading', 1.5), ('k_distance', 0.8), ('v_min', 0.06),
             ('w_min', 0.25), ('turn_in_place_deg', 25.0), ('align_tolerance_deg', 10.0),
             ('align_step_deg', 45.0), ('approach_step', 0.4), ('approach_look_time', 1.0),
-            ('approach_turn_deg', 6.0), ('approach_blind_steps', 6), ('arrive_tolerance', 0.08),
+            ('approach_turn_deg', 6.0), ('approach_blind_steps', 6),
+            ('confirm_distance', 0.5),       # m before the standoff point: stop once to look
+            ('arrive_tolerance', 0.08),
             ('lost_timeout', 0.6), ('local_search_deg', 70.0), ('dwell_time', 1.0),
             ('leg_timeout_factor', 3.0), ('relocalize_gain', 0.7),
             ('require_auto', True),
@@ -112,6 +114,7 @@ class TagMission(Node):
             'sim_min_turn_rate', 'sim_visual_noise_deg', 'sim_yaw_scale_fast', 'k_heading', 'k_distance', 'v_min',
             'w_min', 'turn_in_place_deg', 'align_tolerance_deg', 'align_step_deg',
             'approach_step', 'approach_look_time', 'approach_turn_deg', 'approach_blind_steps',
+            'confirm_distance',
             'sim_blur_linear',
             'arrive_tolerance', 'lost_timeout',
             'local_search_deg', 'dwell_time', 'leg_timeout_factor', 'relocalize_gain',
@@ -232,6 +235,7 @@ class TagMission(Node):
         self.ids, self.positions = [], []
         self.tour = None
         self.visited, self.missed = [], []
+        self.unconfirmed = []          # reached by the remembered map position, tag not seen
         self.target = None
         self.leg_start = 0.0
         self.leg_budget = 0.0
@@ -746,44 +750,51 @@ class TagMission(Node):
         return (v, w)
 
     def plan_approach_step(self):
-        """After a look: arrive, turn toward the tag, or drive a short segment."""
+        """After a look: use the camera if the tag is seen, else the remembered map position.
+
+        Far away: one straight drive (aimed by the camera if the tag is seen, else by the
+        remembered position) to `confirm_distance` before the standoff point, then look.
+        Close and seen: short camera-guided steps (<= approach_step) to the exact standoff,
+        then relocalize.
+        Never sweeps around searching: if the tag is still not seen at its remembered
+        position, that position counts as reached.
+        """
         now = time.monotonic()
         if self.nav_seen:   # measured from sharp frames: average them
             fwd = sum(self.p['camera_offset'] + o.z for o in self.nav_seen) / len(self.nav_seen)
             left = sum(-o.x for o in self.nav_seen) / len(self.nav_seen)
             dist, bearing, seen = math.hypot(fwd, left), math.atan2(left, fwd), True
-            self.nav_blind = 0
             self.latest_obs = (now, {self.target: self.nav_seen[-1]})  # for relocalize()
         else:
             dist, bearing, seen = self.relative_target()
-            self.nav_blind += 1
         remaining = dist - self.model.standoff
         self.get_logger().info(
             f'Approach tag {self.target}: {dist:.2f} m, {math.degrees(bearing):+.0f} deg '
-            f'({"seen" if seen else "map, not seen"})')
+            f'({"camera" if seen else "remembered position"})')
 
         if remaining <= self.p['arrive_tolerance']:
             if seen:
                 self.relocalize()
                 self.set_state('ARRIVED', f'tag {self.target} at {dist:.2f} m')
             else:
-                self.search_turned = 0.0
-                self.set_state('SEARCH', f'tag {self.target} not visible at its map position')
+                self.unconfirmed.append(self.target)
+                self.set_state('ARRIVED', f'tag {self.target} by remembered position (not seen)')
             return (0.0, 0.0)
-        if not seen:
-            if abs(bearing) > math.radians(self.p['turn_in_place_deg']):
-                self.start_align(f'tag {self.target} is {math.degrees(bearing):+.0f} deg off')
-                return (0.0, 0.0)
-            if self.nav_blind > self.p['approach_blind_steps']:
-                self.search_turned = 0.0
-                self.set_state('SEARCH', f'tag {self.target} not seen for {self.nav_blind} looks')
-                return (0.0, 0.0)
+        if not seen and abs(bearing) > math.radians(self.p['turn_in_place_deg']):
+            self.start_align(f'tag {self.target} is {math.degrees(bearing):+.0f} deg off')
+            return (0.0, 0.0)
         if abs(bearing) > math.radians(self.p['approach_turn_deg']):
             self.nav_goal = self.yaw_odom_total + bearing
             self.nav_dir = 1.0 if bearing > 0 else -1.0
             self.nav_phase, self.nav_phase_time = 'turn', now
             return (0.0, 0.0)
-        self.nav_segment = min(remaining, self.p['approach_step'])
+        if remaining > self.p['confirm_distance'] + 0.1:
+            segment = remaining - self.p['confirm_distance']   # one long drive, then look once
+        elif seen:
+            segment = min(remaining, self.p['approach_step'])  # camera-guided finish
+        else:
+            segment = remaining                                 # close, not seen: finish by the map
+        self.nav_segment = segment
         self.nav_start_travel = self.travelled
         self.nav_heading = wrap(self.pose[2] + bearing)
         self.nav_phase, self.nav_phase_time = 'drive', now
@@ -843,7 +854,8 @@ class TagMission(Node):
         tour = now - self.tour_start if self.tour_start else 0.0
         dwell = self.p['dwell_time'] * len(self.visited)
         self.target = None
-        self.set_state('DONE', f'visited {self.visited}, missed {self.missed}; scan {scan:.1f} s, '
+        unconf = f' (not seen on arrival: {self.unconfirmed})' if self.unconfirmed else ''
+        self.set_state('DONE', f'visited {self.visited}{unconf}, missed {self.missed}; scan {scan:.1f} s, '
                                f'tour {tour:.1f} s incl. {dwell:.0f} s dwell '
                                f'(planned {self.planned_time:.1f} s), {self.travelled:.2f} m driven')
 

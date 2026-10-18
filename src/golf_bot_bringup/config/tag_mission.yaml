@@ -57,13 +57,13 @@ tag_mission:
     turn_in_place_deg: 25.0   # turn in place first if the tag is further off than this
     align_tolerance_deg: 10.0 # visual align: done when facing the tag within this
     align_step_deg: 45.0      # visual align: largest turn between two image checks
-    approach_step: 0.4        # m driven between two stops while approaching a tag
+    approach_step: 0.4        # m per step once the tag is seen (camera-guided final approach)
     approach_look_time: 1.0   # s max looking at each approach stop (thorough detection)
     approach_turn_deg: 6.0    # turn toward the tag first if it is further off than this
-    approach_blind_steps: 6   # give up (search) after this many looks without the tag
+    confirm_distance: 0.5     # m: drive by the remembered position, stop this far before the
+                              # standoff point to look once; seen -> camera-guided finish
     arrive_tolerance: 0.08    # m
     lost_timeout: 0.6         # s, a tag counts as visible this long after last detection
-    local_search_deg: 70.0    # sweep +/- this when a tag is not where the map says
     dwell_time: 1.0           # s stop at each tag
     leg_timeout_factor: 3.0   # skip a tag after 3x its planned time (+10 s)
     relocalize_gain: 0.7      # how much to trust a tag sighting to correct the pose
