@@ -60,6 +60,11 @@ tag_mission:
     approach_step: 0.4        # m per step once the tag is seen (camera-guided final approach)
     approach_look_time: 1.0   # s max looking at each approach stop (thorough detection)
     approach_turn_deg: 6.0    # turn toward the tag first if it is further off than this
+    turn_track: true          # stop every turn on the angle MEASURED from the camera while
+                              # turning (not on the command), then set the heading from it
+    turn_track_period: 0.15   # s between image measurements while turning
+    turn_stop_lag: 0.15       # s: initial guess how long the robot keeps turning after the stop
+                              # command (learned from each turn after that)
     confirm_distance: 0.5     # m: drive by the remembered position, stop this far before the
                               # standoff point to look once; seen -> camera-guided finish
     arrive_tolerance: 0.08    # m

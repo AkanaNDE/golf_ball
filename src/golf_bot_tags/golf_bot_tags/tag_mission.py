@@ -87,6 +87,9 @@ class TagMission(Node):
             ('align_step_deg', 45.0), ('approach_step', 0.4), ('approach_look_time', 1.0),
             ('approach_turn_deg', 6.0), ('approach_blind_steps', 6),
             ('confirm_distance', 0.5),       # m before the standoff point: stop once to look
+            ('turn_track', True),            # stop turns on the angle measured from the images
+            ('turn_track_period', 0.15),     # s between image measurements while turning
+            ('turn_stop_lag', 0.15),         # s: stop this early (robot keeps turning a bit)
             ('arrive_tolerance', 0.08),
             ('lost_timeout', 0.6), ('local_search_deg', 70.0), ('dwell_time', 1.0),
             ('leg_timeout_factor', 3.0), ('relocalize_gain', 0.7),
@@ -114,7 +117,7 @@ class TagMission(Node):
             'sim_min_turn_rate', 'sim_visual_noise_deg', 'sim_yaw_scale_fast', 'k_heading', 'k_distance', 'v_min',
             'w_min', 'turn_in_place_deg', 'align_tolerance_deg', 'align_step_deg',
             'approach_step', 'approach_look_time', 'approach_turn_deg', 'approach_blind_steps',
-            'confirm_distance',
+            'confirm_distance', 'turn_track', 'turn_track_period', 'turn_stop_lag',
             'sim_blur_linear',
             'arrive_tolerance', 'lost_timeout',
             'local_search_deg', 'dwell_time', 'leg_timeout_factor', 'relocalize_gain',
@@ -232,6 +235,13 @@ class TagMission(Node):
         self.scan_cmd_speed = None     # turn rate command (boosted if the robot stalls)
         self.scan_visual_ok = 0
         self.scan_pending = []         # detections while turning, waiting for the stop's yaw
+        now = time.monotonic()         # turn tracker defaults (see start_turn_track)
+        self.tt_goal, self.tt_dir, self.tt_odom0 = 0.0, 1.0, 0.0
+        self.tt_t0 = self.tt_boost_time = now
+        self.tt_value, self.tt_time, self.tt_last_try, self.tt_frame, self.tt_ref = None, 0.0, 0.0, -1, None
+        self.tt_stop_meas, self.tt_stop_w = None, 0.0
+        if not hasattr(self, 'turn_lag'):
+            self.turn_lag = self.p['turn_stop_lag']   # learned: how long the robot keeps turning
         self.ids, self.positions = [], []
         self.tour = None
         self.visited, self.missed = [], []
@@ -416,7 +426,11 @@ class TagMission(Node):
             if obs:  # sharp enough with a short exposure: keep, yaw is filled in at the next stop
                 self.scan_pending.append((obs, self.scan_history.at(self.frame_stamp) or
                                           (self.pose[0], self.pose[1], self.scan_turned)))
-            if direction * (self.scan_turned - self.scan_target) >= 0:
+            done = self.turn_finished(self.scan_cmd_speed,
+                                      direction * (self.scan_turned - self.scan_target) >= 0)
+            if done == 'stalled':
+                self.scan_cmd_speed = self.boost_turn(self.scan_cmd_speed)
+            elif done:
                 self.scan_phase, self.scan_phase_time = 'settle', now
                 return (0.0, 0.0)
             return (0.0, direction * self.scan_cmd_speed)
@@ -453,6 +467,7 @@ class TagMission(Node):
         # odometry turn that should give a real turn of `step`
         self.scan_target = self.scan_turned + direction * step / max(self.scan_ratio, 0.2)
         self.scan_phase = 'turn'
+        self.start_turn_track(direction * step)
         return (0.0, 0.0)
 
     def measure_stop_yaw(self, direction):
@@ -508,6 +523,8 @@ class TagMission(Node):
         self.scan_true += step_true
         self.scan_stop_yaw = self.scan_true
         self.scan_odom_at_kf = self.scan_turned
+        if self.scan_stop > 0 and turn is not None:
+            self.learn_turn_lag(step_true)
         if self.scan_stop > 0:
             self.get_logger().info(f'  turned {math.degrees(step_true):+.1f} deg real '
                                    f'(odometry {math.degrees(odom_step):+.1f}) by {how}, '
@@ -601,6 +618,97 @@ class TagMission(Node):
         self.align_kf = None
         self.set_state('ALIGN', note)
 
+    # TURN TRACKING -------------------------------------------------------------
+    def start_turn_track(self, goal):
+        """Start a turn of `goal` rad (real, left +) that is measured from the images.
+
+        Dead reckoning cannot tell how far a skid-steer robot really turned (slip, stall,
+        non-linear motor response), so while turning the current frame is compared with the
+        frame taken when the turn started (same visual method as between scan stops, on a
+        640 px copy so it stays fast) and the turn stops when the measured angle is reached.
+        """
+        now = time.monotonic()
+        self.tt_goal, self.tt_dir = goal, (1.0 if goal >= 0 else -1.0)
+        self.tt_odom0, self.tt_t0, self.tt_boost_time = self.yaw_odom_total, now, now
+        self.tt_value, self.tt_time, self.tt_last_try = None, 0.0, 0.0
+        self.tt_stop_meas = None
+        self.tt_yaw0 = self.pose[2]
+        self.tt_frame = getattr(self, 'last_frame', -1)
+        self.tt_ref = self.truth_turned if self.p['simulate'] else self._small_keyframe()
+
+    def _small_keyframe(self):
+        if self.latest_frame is None or not hasattr(self, 'detector'):
+            return None
+        img, w = self.latest_frame, self.latest_frame.shape[1]
+        scale = 640.0 / w if w > 640 else 1.0
+        if scale < 1.0:
+            img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        return {'kf': self.rotation.keyframe(img), 'f': self.detector.focal(w) * scale}
+
+    def turn_progress(self):
+        """Real turn since start_turn_track (rad, signed), or None if not measurable now."""
+        now = time.monotonic()
+        if self.p['simulate']:
+            if self.tt_ref is None:
+                self.tt_ref = self.truth_turned
+            self.tt_value, self.tt_time = self.truth_turned - self.tt_ref, now
+            return self.tt_value
+        if self.tt_ref is None:
+            self.tt_ref = self._small_keyframe()
+            return None
+        if (now - self.tt_last_try >= self.p['turn_track_period'] and self.last_frame != self.tt_frame
+                and self.latest_frame is not None):
+            self.tt_last_try, self.tt_frame = now, self.last_frame
+            cur = self._small_keyframe()
+            turn, _ = self.rotation.turn(self.tt_ref['kf'], cur['kf'], cur['f'])
+            if turn is not None:
+                self.tt_value, self.tt_time = turn, now
+        return self.tt_value if now - self.tt_time < 0.6 else None
+
+    def turn_finished(self, w_cmd, odom_done):
+        """True when the measured turn reached the goal, 'stalled' if the robot is not turning,
+        else False. Falls back to dead reckoning (odom_done) when the image cannot be matched."""
+        now = time.monotonic()
+        goal = abs(self.tt_goal)
+        odom = self.tt_dir * (self.yaw_odom_total - self.tt_odom0)
+        if odom > 2.0 * goal + 0.35:
+            return True                      # safety: never spin on, whatever the images say
+        meas = self.turn_progress() if self.p['turn_track'] else None
+        if meas is None:
+            return odom_done
+        if self.tt_dir * meas >= goal - abs(w_cmd) * self.turn_lag:
+            self.tt_stop_meas, self.tt_stop_w = meas, abs(w_cmd)   # to learn the coasting
+            return True
+        if now - self.tt_t0 > 1.5 and abs(meas) < math.radians(1.5) and now - self.tt_boost_time > 1.0:
+            self.tt_boost_time = now
+            return 'stalled'
+        return False
+
+    def finish_turn_track(self):
+        """Robot is still again: set the heading from the measured turn (not dead reckoning)."""
+        self.tt_last_try = 0.0                     # measure now, on the newest (sharp) frame
+        meas = self.turn_progress()
+        if meas is None:
+            return
+        self.pose[2] = wrap(self.tt_yaw0 + meas)
+        self.learn_turn_lag(meas)
+
+    def learn_turn_lag(self, final_turn):
+        """After a tracked turn: compare the final (still) measurement with the goal and adjust
+        how early to stop, so the next turns land on the requested angle."""
+        if self.tt_stop_meas is None or self.tt_stop_w < 0.05 or abs(self.tt_goal) < math.radians(5):
+            return
+        error = self.tt_dir * (final_turn - self.tt_goal)       # + overshoot, - undershoot
+        self.turn_lag = clamp(self.turn_lag + 0.5 * error / self.tt_stop_w, 0.0, 0.6)
+        self.tt_stop_meas = None
+
+    def boost_turn(self, current):
+        boosted = min(current * 1.3, self.p['scan_speed_max'])
+        self.turn_deadband = max(self.turn_deadband, current)
+        self.w_turn_min = max(self.w_turn_min, boosted)
+        self.get_logger().warn(f'Not turning (camera): turn command {current:.2f} -> {boosted:.2f} rad/s')
+        return boosted
+
     def capture_keyframe(self):
         if self.p['simulate']:
             return {'sim': self.truth_turned}
@@ -634,6 +742,7 @@ class TagMission(Node):
                 est = self.yaw_odom_total - self.align_odom0
                 if real is not None:
                     self.pose[2] = wrap(self.align_yaw0 + real)
+                    self.learn_turn_lag(real)
                     if abs(est) > math.radians(5) and abs(real) > math.radians(2):
                         ratio = clamp(real / est, 0.3, 3.0)
                         self.yaw_scale *= 1.0 + 0.5 * (ratio - 1.0)   # learn, gently
@@ -665,18 +774,27 @@ class TagMission(Node):
             self.align_goal = self.yaw_odom_total + step
             self.align_dir = 1.0 if step > 0 else -1.0
             self.align_phase = 'turn'
+            self.start_turn_track(step)
             return (0.0, 0.0)
 
         # turn: until dead reckoning says the step is done, then settle and measure;
         # stop early if the target appears (sharp frames while turning with short exposure)
         remaining = self.align_dir * (self.align_goal - self.yaw_odom_total)
+        meas = self.tt_value if self.tt_value is not None else None
+        if meas is not None:                      # slow down on the measured remaining angle
+            remaining_real = abs(self.tt_goal) - self.tt_dir * meas
+        else:
+            remaining_real = remaining
+        w = max(self.w_turn_min, min(self.model.w_max, self.p['k_heading'] * max(remaining_real, 0)))
+        done = self.turn_finished(w, remaining <= 0)
         if any(o.tag_id == self.target for o in obs):
             self.get_logger().info(f'Align: tag {self.target} seen while turning, stopping')
-            remaining = 0.0
-        if remaining <= 0:
+            done = True
+        if done == 'stalled':
+            self.boost_turn(w)
+        elif done:
             self.align_phase, self.align_phase_time = 'settle', now
             return (0.0, 0.0)
-        w = max(self.w_turn_min, min(self.model.w_max, self.p['k_heading'] * remaining))
         return (0.0, self.align_dir * w)
 
     def target_position(self):
@@ -699,6 +817,7 @@ class TagMission(Node):
         self.nav_phase_time = time.monotonic()
         self.nav_blind = 0
         self.nav_seen = []
+        self.nav_turned = False
         self.set_state('NAVIGATE', note)
 
     def step_navigate(self, obs, pose):
@@ -715,6 +834,9 @@ class TagMission(Node):
 
         if self.nav_phase == 'settle':
             if now - self.nav_phase_time >= self.p['scan_settle_time']:
+                if self.nav_turned:
+                    self.finish_turn_track()
+                    self.nav_turned = False
                 self.nav_phase, self.nav_phase_time, self.nav_seen = 'look', now, []
             return (0.0, 0.0)
 
@@ -731,10 +853,14 @@ class TagMission(Node):
 
         if self.nav_phase == 'turn':
             remaining = self.nav_dir * (self.nav_goal - self.yaw_odom_total)
-            if remaining <= 0:
+            w = max(self.w_turn_min, min(self.model.w_max, self.p['k_heading'] * max(remaining, 0)))
+            done = self.turn_finished(w, remaining <= 0)
+            if done == 'stalled':
+                self.boost_turn(w)
+            elif done:
                 self.nav_phase, self.nav_phase_time = 'settle', now
+                self.nav_turned = True
                 return (0.0, 0.0)
-            w = max(self.w_turn_min, min(self.model.w_max, self.p['k_heading'] * remaining))
             return (0.0, self.nav_dir * w)
 
         # drive: straight, holding the heading, for the planned segment
@@ -787,6 +913,7 @@ class TagMission(Node):
             self.nav_goal = self.yaw_odom_total + bearing
             self.nav_dir = 1.0 if bearing > 0 else -1.0
             self.nav_phase, self.nav_phase_time = 'turn', now
+            self.start_turn_track(bearing)
             return (0.0, 0.0)
         if remaining > self.p['confirm_distance'] + 0.1:
             segment = remaining - self.p['confirm_distance']   # one long drive, then look once
