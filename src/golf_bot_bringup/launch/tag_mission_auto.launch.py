@@ -45,8 +45,11 @@ def generate_launch_description():
         Node(package='golf_bot_control', executable='wheel_odometry', name='wheel_odometry',
              parameters=[robot_params], output='screen'),
 
+        # respawn: if the ESP32 port cannot be opened (unplugged, USB chip stuck) or drops
+        # out, the agent restarts every 2 s instead of staying dead for the whole run
         Node(package='micro_ros_agent', executable='micro_ros_agent', name='micro_ros_agent',
              arguments=['serial', '--dev', serial_port, '-b', baud_rate],
+             respawn=True, respawn_delay=2.0,
              condition=IfCondition(use_agent), output='screen'),
 
         # No teleop in between: the mission drives /cmd_vel directly
