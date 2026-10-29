@@ -27,15 +27,23 @@ uint32_t run_until_ms = 0;
 int64_t last_counts[4] = {0, 0, 0, 0};
 uint32_t last_print_ms = 0;
 
-void startRun(int mask, float d, uint32_t duration_ms) {
+void startDuties(const float duties[4], uint32_t duration_ms, const char *label) {
   stopAllMotors();
-  active_mask = mask;
-  active_duty = d;
-  run_until_ms = millis() + duration_ms;
+  active_mask = 0;
   for (int i = 0; i < 4; i++) {
-    if (mask & (1 << i)) motorWrite(i, d);
+    if (duties[i] != 0.0f) active_mask |= 1 << i;
+    motorWrite(i, duties[i]);
   }
-  Serial.printf("\n>>> run mask=0x%X duty=%d%% for %lu ms\n", mask, (int)(d * 100), duration_ms);
+  run_until_ms = millis() + duration_ms;
+  Serial.printf("\n>>> %s: M1 %+d%% M2 %+d%% M3 %+d%% M4 %+d%% for %lu ms\n", label,
+                (int)(duties[0] * 100), (int)(duties[1] * 100), (int)(duties[2] * 100),
+                (int)(duties[3] * 100), duration_ms);
+}
+
+void startRun(int mask, float d, uint32_t duration_ms) {
+  float duties[4] = {0, 0, 0, 0};
+  for (int i = 0; i < 4; i++) if (mask & (1 << i)) duties[i] = d;
+  startDuties(duties, duration_ms, d >= 0 ? "FORWARD" : "BACKWARD");
 }
 
 void stopRun() {
@@ -48,6 +56,7 @@ void printHelp() {
   Serial.println();
   Serial.println("=== Golf bot motor/encoder test (LIFT THE WHEELS!) ===");
   Serial.println("1..4 = run M1..M4 forward 2 s | f = all forward | m = max speed test");
+  Serial.println("q/w/e/r = run M1..M4 BACKWARD 2 s | b = all backward | t = turn LEFT in place");
   Serial.println("+/- = duty +/-10%  | c = clear counts | s = stop | h = help");
   Serial.printf("Current duty: %d%%   TICKS_PER_REV (config): %.0f\n",
                 (int)(duty * 100), (float)ENCODER_TICKS_PER_REV);
@@ -79,6 +88,18 @@ void loop() {
         startRun(1 << (c - '1'), duty, 2000);
         break;
       case 'f': startRun(0xF, duty, 2000); break;
+      // direction test: the same motor BACKWARD (every wheel must reverse)
+      case 'q': startRun(1 << 0, -duty, 2000); break;
+      case 'w': startRun(1 << 1, -duty, 2000); break;
+      case 'e': startRun(1 << 2, -duty, 2000); break;
+      case 'r': startRun(1 << 3, -duty, 2000); break;
+      case 'b': startRun(0xF, -duty, 2000); break;
+      case 't': {  // turn LEFT in place: left wheels backward, right wheels forward
+        float d[4] = {0, 0, 0, 0};
+        d[WHEEL_FL] = -duty; d[WHEEL_RL] = -duty; d[WHEEL_FR] = duty; d[WHEEL_RR] = duty;
+        startDuties(d, 2000, "TURN LEFT");
+        break;
+      }
       case 'm': startRun(0xF, 1.0f, 3000); break;
       case '+': duty = min(duty + 0.1f, 1.0f); Serial.printf("duty %d%%\n", (int)(duty * 100)); break;
       case '-': duty = max(duty - 0.1f, 0.1f); Serial.printf("duty %d%%\n", (int)(duty * 100)); break;
