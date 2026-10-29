@@ -69,7 +69,11 @@ tag_mission:
     align_step_deg: 45.0      # visual align: largest turn between two image checks
     approach_step: 0.4        # m per step once the tag is seen (camera-guided final approach)
     approach_look_time: 1.0   # s max looking at each approach stop (thorough detection)
-    approach_turn_deg: 6.0    # turn toward the tag first if it is further off than this
+    approach_turn_deg: 20.0   # turn in place toward a SEEN tag only if it is further off than this;
+                              # smaller offsets are steered out while driving (no back-and-forth)
+    approach_max_corrections: 1  # in-place turns toward a seen tag, then drive and steer anyway
+    drive_visual_steer: true  # while driving, aim at the tag as seen in each (sharp) frame
+    visual_steer_gain: 0.5    # 0..1: how strongly each sighting moves the heading goal
     turn_track: false         # true: stop every turn on the angle MEASURED from the camera while
                               # turning (not on the command), then set the heading from it
     turn_track_period: 0.15   # s between image measurements while turning
@@ -95,5 +99,6 @@ tag_mission:
     sim_blur_speed: -1.0      # rad/s: blurred above this turn rate (-1 = from exposure: 2 px)
     sim_auto_exposure_ms: 33.0 # simulated exposure when exposure_ms = 0
     sim_min_turn_rate: 0.0    # rad/s: simulated stall when turning in place slower than this
+    sim_turn_lag: 0.0         # s: simulated turn inertia (keeps turning after a stop), e.g. 0.4
     sim_visual_noise_deg: 0.7
     sim_blur_linear: 0.0      # m/s: simulated frames blurred when driving faster than this

@@ -93,7 +93,10 @@ class TagMission(Node):
             ('rate', 20.0), ('k_heading', 1.5), ('k_distance', 0.8), ('v_min', 0.06),
             ('w_min', 0.25), ('turn_in_place_deg', 25.0), ('align_tolerance_deg', 10.0),
             ('align_step_deg', 45.0), ('approach_step', 0.4), ('approach_look_time', 1.0),
-            ('approach_turn_deg', 6.0), ('approach_blind_steps', 6),
+            ('approach_turn_deg', 20.0), ('approach_blind_steps', 6),
+            ('approach_max_corrections', 1),  # in-place turns toward a seen tag before driving anyway
+            ('drive_visual_steer', True),    # steer toward the tag seen in the image while driving
+            ('visual_steer_gain', 0.5),      # 0..1: how much each sighting moves the heading goal
             ('confirm_distance', 0.5),       # m before the standoff point: stop once to look
             ('turn_track', False),           # stop turns on the angle measured from the images
             ('turn_track_period', 0.15),     # s between image measurements while turning
@@ -116,6 +119,8 @@ class TagMission(Node):
             ('sim_render', False),           # render tag images + run the real detector
             ('sim_imu', False),              # simulated IMU (true yaw + slow drift) on /imu path
             ('sim_blur_linear', 0.0),        # m/s: frames blurred when driving faster than this
+            ('sim_turn_lag', 0.0),           # s: simulated turn rate follows the command this slowly
+                                             # (robot keeps turning after a stop -> overshoot)
         ])
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         self.p = {n: g(n) for n in [
@@ -127,8 +132,9 @@ class TagMission(Node):
             'sim_min_turn_rate', 'sim_visual_noise_deg', 'sim_yaw_scale_fast', 'k_heading', 'k_distance', 'v_min',
             'w_min', 'turn_in_place_deg', 'align_tolerance_deg', 'align_step_deg',
             'approach_step', 'approach_look_time', 'approach_turn_deg', 'approach_blind_steps',
+            'approach_max_corrections', 'drive_visual_steer', 'visual_steer_gain',
             'confirm_distance', 'turn_track', 'turn_track_period', 'turn_stop_lag', 'sim_imu',
-            'sim_blur_linear',
+            'sim_blur_linear', 'sim_turn_lag',
             'arrive_tolerance', 'lost_timeout',
             'local_search_deg', 'dwell_time', 'leg_timeout_factor', 'relocalize_gain',
             'require_auto', 'exact_limit', 'simulate', 'sim_yaw_scale', 'start_delay',
@@ -357,6 +363,10 @@ class TagMission(Node):
                 tw = w * self.p['sim_yaw_scale_fast']
             if abs(v) < 0.02 and abs(w) < self.p['sim_min_turn_rate']:
                 tw = 0.0                   # too weak to overcome skid-steer friction
+            if self.p['sim_turn_lag'] > 0:  # inertia: the real turn rate lags the command
+                self.sim_rate = getattr(self, 'sim_rate', 0.0)
+                self.sim_rate += (tw - self.sim_rate) * min(1.0, self.dt / self.p['sim_turn_lag'])
+                tw = self.sim_rate
             self.truth_rate = tw
             self.truth_speed = v
             self.truth_turned += tw * self.dt
@@ -424,7 +434,9 @@ class TagMission(Node):
             cmd = handler(obs, pose)
             # sharp images: no faster than the blur limit, but never below a turn rate that
             # was found necessary to move at all (w_turn_min grows when turns stall)
-            w_lim = max(self.w_blur, self.w_turn_min, self.p['w_min'])
+            # (a scan step boosted after a stall must get through too)
+            w_lim = max(self.w_blur, self.w_turn_min, self.p['w_min'],
+                        (self.scan_cmd_speed or 0.0) if self.state == 'SCAN' else 0.0)
             cmd = (cmd[0], max(-w_lim, min(w_lim, cmd[1])))
         if active:
             self.out = (self.ramp(self.out[0], cmd[0], self.p['accel_linear']),
@@ -750,6 +762,13 @@ class TagMission(Node):
             return True                      # safety: never spin on, whatever the images say
         meas = self.turn_progress() if self.p['turn_track'] else None
         if meas is None:
+            if self.imu_active and goal > math.radians(3):
+                # IMU = real turn: stop early by the learned coasting (rate x lag), else the
+                # robot keeps rolling past the goal and the next correction turns back
+                if odom >= goal - abs(w_cmd) * self.turn_lag:
+                    self.tt_stop_meas, self.tt_stop_w = odom, abs(w_cmd)
+                    return True
+                return False
             return odom_done
         if self.tt_dir * meas >= goal - abs(w_cmd) * self.turn_lag:
             self.tt_stop_meas, self.tt_stop_w = meas, abs(w_cmd)   # to learn the coasting
@@ -762,6 +781,16 @@ class TagMission(Node):
     def finish_turn_track(self):
         """Robot is still again: set the heading from the measured turn (not dead reckoning)."""
         self.tt_last_try = 0.0                     # measure now, on the newest (sharp) frame
+        if self.imu_active and not self.p['turn_track']:
+            # robot is still: the IMU gives the full real turn incl. coasting -> learn the lag
+            final = self.yaw_odom_total - self.tt_odom0
+            if self.tt_stop_meas is not None:
+                before = self.turn_lag
+                self.learn_turn_lag(final)
+                self.get_logger().info(
+                    f'Turn {math.degrees(final):+.0f} deg (goal {math.degrees(self.tt_goal):+.0f}): '
+                    f'stop lag {before:.2f} -> {self.turn_lag:.2f} s')
+            return
         meas = self.turn_progress()
         if meas is None or self.imu_active:      # the IMU already tracks the heading
             return
@@ -893,6 +922,7 @@ class TagMission(Node):
         self.nav_blind = 0
         self.nav_seen = []
         self.nav_turned = False
+        self.nav_corrections = 0
         self.set_state('NAVIGATE', note)
 
     def step_navigate(self, obs, pose):
@@ -944,6 +974,12 @@ class TagMission(Node):
         if remaining <= 0:
             self.nav_phase, self.nav_phase_time = 'settle', now
             return (0.0, 0.0)
+        if self.p['drive_visual_steer'] and pose is not None:
+            o = next((o for o in obs if o.tag_id == self.target), None)
+            if o is not None:   # heading to the tag as seen in this frame (pose at frame time)
+                seen_heading = wrap(pose[2] + math.atan2(-o.x, self.p['camera_offset'] + o.z))
+                self.nav_heading = wrap(self.nav_heading + self.p['visual_steer_gain']
+                                        * wrap(seen_heading - self.nav_heading))
         v = clamp(self.p['k_distance'] * remaining + self.p['v_min'], self.p['v_min'],
                   self.model.v_max)
         w = clamp(self.p['k_heading'] * wrap(self.nav_heading - self.pose[2]),
@@ -984,7 +1020,14 @@ class TagMission(Node):
         if not seen and abs(bearing) > math.radians(self.p['turn_in_place_deg']):
             self.start_align(f'tag {self.target} is {math.degrees(bearing):+.0f} deg off')
             return (0.0, 0.0)
-        if abs(bearing) > math.radians(self.p['approach_turn_deg']):
+        # a seen tag a little off-centre needs no turn in place: the drive steers toward it.
+        # After `approach_max_corrections` turns, drive anyway (no turning back and forth)
+        turn_needed = abs(bearing) > math.radians(self.p['approach_turn_deg'])
+        if (turn_needed and seen and self.nav_corrections >= self.p['approach_max_corrections']
+                and abs(bearing) <= math.radians(self.p['turn_in_place_deg']) + 0.2):
+            turn_needed = False
+        if turn_needed:
+            self.nav_corrections += 1
             self.nav_goal = self.yaw_odom_total + bearing
             self.nav_dir = 1.0 if bearing > 0 else -1.0
             self.nav_phase, self.nav_phase_time = 'turn', now
@@ -996,6 +1039,7 @@ class TagMission(Node):
             segment = min(remaining, self.p['approach_step'])  # camera-guided finish
         else:
             segment = remaining                                 # close, not seen: finish by the map
+        self.nav_corrections = 0
         self.nav_segment = segment
         self.nav_start_travel = self.travelled
         self.nav_heading = wrap(self.pose[2] + bearing)
