@@ -8,7 +8,7 @@ then run on the robot:
 It measures continuously:  focal_px = distance * tag_height_px / tag_size
 prints the running median every second, and publishes the annotated camera image on
 /tag_calibration/image/compressed (view it on the laptop: ros2 run golf_bot_vision image_viewer).
-Press Ctrl+C when the value is stable; put focal_px in tag_mission.yaml.
+Press Ctrl+C when the value is stable; put focal_px and focal_width in tag_mission.yaml.
 Repeat at 2-3 distances to check it.
 """
 
@@ -23,7 +23,8 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import CompressedImage
 
-from golf_bot_tags.tag_vision import TagDetector, encode_jpeg, open_camera
+from golf_bot_tags.tag_vision import (TagDetector, encode_jpeg, open_camera, preview_frame,
+                                      set_exposure)
 
 
 class FocalCalibration(Node):
@@ -32,6 +33,7 @@ class FocalCalibration(Node):
         super().__init__('tag_focal_calibration')
         self.a = a
         dev, self.cap = open_camera(a.camera, a.width, a.height)
+        set_exposure(self.cap, a.exposure)
         self.det = TagDetector(a.family, a.size, focal_px=1.0)  # focal unused: only h_px
         self.pub = self.create_publisher(CompressedImage, 'tag_calibration/image/compressed', 2)
         self.values = []
@@ -73,10 +75,11 @@ class FocalCalibration(Node):
         if self.pub.get_subscription_count() == 0 or now - self.last_image < 0.12:
             return  # nobody watching, or keep it ~8 FPS over WiFi
         self.last_image = now
-        img = frame.copy()
+        img, scale = preview_frame(frame)
+        w, h = img.shape[1], img.shape[0]
         cv2.line(img, (w // 2, 0), (w // 2, h), (255, 255, 255), 1)
         for o in obs:
-            pts = o.corners.astype(int).reshape(-1, 1, 2)
+            pts = (o.corners * scale).astype(int).reshape(-1, 1, 2)
             centered = abs(o.u) < 0.15
             color = (0, 255, 0) if centered else (0, 165, 255)
             cv2.polylines(img, [pts], True, color, 2)
@@ -105,7 +108,9 @@ class FocalCalibration(Node):
             return
         hfov = math.degrees(2 * math.atan(self.width / 2 / f))
         print(f'\nfocal_px: {f:.1f}    (horizontal FOV {hfov:.1f} deg, {len(self.values)} samples)')
-        print('Put this value in src/golf_bot_bringup/config/tag_mission.yaml -> focal_px')
+        print('Put these in src/golf_bot_bringup/config/tag_mission.yaml:')
+        print(f'    focal_px: {f:.1f}')
+        print(f'    focal_width: {self.width}')
 
 
 def main(args=None):
@@ -113,9 +118,11 @@ def main(args=None):
     ap.add_argument('--distance', type=float, required=True, help='camera-to-tag distance (m)')
     ap.add_argument('--size', type=float, default=0.15, help='black square side length (m)')
     ap.add_argument('--family', default='36h11')
-    ap.add_argument('--camera', default='auto', help='auto, index, /dev/videoN or a device name such as UGREEN')
-    ap.add_argument('--width', type=int, default=1280, help='use the same size as tag_mission')
-    ap.add_argument('--height', type=int, default=720)
+    ap.add_argument('--camera', default='UGREEN',
+                    help='device name (part of it), auto, index or /dev/videoN')
+    ap.add_argument('--width', type=int, default=2560, help='use the same size as tag_mission')
+    ap.add_argument('--height', type=int, default=1440)
+    ap.add_argument('--exposure', type=float, default=0.0, help='ms, 0 = auto exposure')
     a, _ = ap.parse_known_args(sys.argv[1:] if args is None else args)
 
     rclpy.init(args=args)

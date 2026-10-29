@@ -54,7 +54,8 @@ def set_exposure(cap, exposure_ms=0.0, gain=-1.0, dev=None, controls=''):
     Motion blur in pixels = turn rate (rad/s) x exposure (s) x focal (px). Indoors auto
     exposure is often 20-33 ms: at 0.4 rad/s and f = 670 px that is 5-9 px of blur, and
     AprilTags are lost above ~2 px. 5 ms gives ~1.3 px. Raise gain (or add light) to
-    compensate the darker image. exposure_ms <= 0 keeps auto exposure.
+    compensate the darker image. exposure_ms <= 0 switches the camera to auto exposure
+    (also undoing a manual exposure left behind by an earlier run).
     V4L2 units: exposure is in 100 us steps; AUTO_EXPOSURE 1 = manual, 3 = auto.
     `controls` (e.g. 'auto_exposure=1,exposure_time_absolute=50') is passed to v4l2-ctl
     for cameras whose controls OpenCV cannot set. Returns a short description.
@@ -65,6 +66,9 @@ def set_exposure(cap, exposure_ms=0.0, gain=-1.0, dev=None, controls=''):
         cap.set(cv2.CAP_PROP_EXPOSURE, exposure_ms * 10.0)
         notes.append(f'exposure {cap.get(cv2.CAP_PROP_EXPOSURE) / 10.0:.1f} ms '
                      f'(asked {exposure_ms:.1f}, auto={cap.get(cv2.CAP_PROP_AUTO_EXPOSURE):.0f})')
+    else:
+        cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+        notes.append('auto exposure')
     if gain >= 0:
         cap.set(cv2.CAP_PROP_GAIN, gain)
         notes.append(f'gain {cap.get(cv2.CAP_PROP_GAIN):.0f}')
@@ -73,7 +77,7 @@ def set_exposure(cap, exposure_ms=0.0, gain=-1.0, dev=None, controls=''):
         r = subprocess.run(['v4l2-ctl', '-d', str(dev), '-c', controls],
                            capture_output=True, text=True)
         notes.append(f'v4l2-ctl {controls}: ' + ('ok' if r.returncode == 0 else r.stderr.strip()))
-    return ', '.join(notes) if notes else 'auto exposure'
+    return ', '.join(notes)
 
 
 def _video_name(dev):
@@ -120,8 +124,20 @@ def open_camera(camera='auto', width=640, height=480, fourcc='MJPG'):
     raise RuntimeError(f'No working camera found (tried {devs}). Check: v4l2-ctl --list-devices')
 
 
-def encode_jpeg(img, quality=60, max_width=640):
-    if img.shape[1] > max_width:  # preview only: keep WiFi traffic low at high resolutions
+PREVIEW_WIDTH = 1280  # camera preview size (laptop); the overlay is drawn at this size
+
+
+def preview_frame(frame, max_width=PREVIEW_WIDTH):
+    """(copy of the frame shrunk to max_width, scale): draw overlays on this, so text and
+    lines keep their size whatever the camera resolution."""
+    if frame.shape[1] <= max_width:
+        return frame.copy(), 1.0
+    scale = max_width / frame.shape[1]
+    return cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA), scale
+
+
+def encode_jpeg(img, quality=75, max_width=PREVIEW_WIDTH):
+    if img.shape[1] > max_width:  # preview only: keep network traffic low at high resolutions
         scale = max_width / img.shape[1]
         img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     ok, jpg = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, quality])
@@ -132,30 +148,53 @@ def focal_from_hfov(width, hfov_deg):
     return (width / 2.0) / math.tan(math.radians(hfov_deg) / 2.0)
 
 
+# Detector settings for small / far tags (default OpenCV needs a ~31 px tag, these ~21 px):
+# accept tiny squares, more adaptive-threshold window sizes, decode cells from fewer pixels
+SMALL_TAG_PARAMS = dict(
+    minMarkerPerimeterRate=0.005, minCornerDistanceRate=0.02, minDistanceToBorder=1,
+    adaptiveThreshWinSizeMin=3, adaptiveThreshWinSizeMax=33, adaptiveThreshWinSizeStep=6,
+    polygonalApproxAccuracyRate=0.05,
+    perspectiveRemovePixelPerCell=8, perspectiveRemoveIgnoredMarginPerCell=0.2)
+
+
+def _detector_params(refinement):
+    p = cv2.aruco.DetectorParameters()
+    p.cornerRefinementMethod = refinement
+    for name, value in SMALL_TAG_PARAMS.items():
+        setattr(p, name, value)
+    return p
+
+
 class TagDetector:
-    """Two detection modes (measured on 1280x720 with 4 cm tags):
-      fast      SUBPIX corners, ~4 ms/frame, tags up to ~1.0 m   -> while the robot moves
-      thorough  AprilTag quad detection, ~130 ms/frame (laptop), up to ~1.5 m -> when still
-    Moving frames are blurred anyway, so the slow mode is only worth it when standing still.
+    """Two detection modes (measured on 2560x1440, laptop, 4 cm tags):
+      fast      SUBPIX corners, ~130 ms/frame          -> while the robot drives forward
+      thorough  AprilTag quad detection, ~300 ms/frame  -> when still (more precise corners)
+    A 4 cm tag is found down to ~21 px: ~2.4 m at 2560x1440, ~1.8 m at 1920, ~1.2 m at 1280.
+
+    focal_px is measured at `focal_width` pixels wide and scaled to the real frame width,
+    so changing the resolution (same aspect ratio) does not need a new calibration.
     """
 
     def __init__(self, family='36h11', tag_size=0.15, focal_px=0.0, hfov_deg=70.0,
-                 min_side_px=12.0):
+                 min_side_px=12.0, focal_width=0):
         self.dictionary = cv2.aruco.getPredefinedDictionary(FAMILIES[family])
-        fast = cv2.aruco.DetectorParameters()
-        fast.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-        thorough = cv2.aruco.DetectorParameters()
-        thorough.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_APRILTAG
+        fast = _detector_params(cv2.aruco.CORNER_REFINE_SUBPIX)
+        thorough = _detector_params(cv2.aruco.CORNER_REFINE_APRILTAG)
         self.fast = cv2.aruco.ArucoDetector(self.dictionary, fast)
         self.thorough = cv2.aruco.ArucoDetector(self.dictionary, thorough)
         self.detector = self.thorough
         self.tag_size = tag_size
         self.focal_px = focal_px
+        self.focal_width = focal_width
         self.hfov_deg = hfov_deg
         self.min_side_px = min_side_px
 
     def focal(self, width):
-        return self.focal_px if self.focal_px > 0 else focal_from_hfov(width, self.hfov_deg)
+        if self.focal_px <= 0:
+            return focal_from_hfov(width, self.hfov_deg)
+        if self.focal_width > 0:
+            return self.focal_px * width / self.focal_width
+        return self.focal_px
 
     def detect(self, frame, stamp, thorough=True):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
@@ -198,7 +237,8 @@ class RotationEstimator:
     """
 
     def __init__(self, features=1500, ratio=0.8, max_dy_px=25.0, min_matches=12,
-                 inlier_deg=2.0, min_inlier_frac=0.35, fast_threshold=7, min_response=0.08):
+                 inlier_deg=2.0, min_inlier_frac=0.35, fast_threshold=7, min_response=0.08,
+                 max_width=1280):
         self.orb = cv2.ORB_create(features, fastThreshold=fast_threshold)
         self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
         self.ratio = ratio
@@ -207,13 +247,18 @@ class RotationEstimator:
         self.inlier = math.radians(inlier_deg)
         self.min_inlier_frac = min_inlier_frac
         self.min_response = min_response
+        self.max_width = max_width
         self._maps = {}
 
     def keyframe(self, frame):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+        scale = 1.0
+        if self.max_width and gray.shape[1] > self.max_width:  # turn angle needs no full resolution
+            scale = self.max_width / gray.shape[1]
+            gray = cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
         gray = cv2.equalizeHist(gray)   # more corners in dull / dark scenes
         kp, des = self.orb.detectAndCompute(gray, None)
-        return {'kp': kp, 'des': des, 'w': gray.shape[1], 'gray': gray}
+        return {'kp': kp, 'des': des, 'w': gray.shape[1], 'gray': gray, 'scale': scale}
 
     # --- 1. features -------------------------------------------------------------
     def _turn_features(self, kf1, kf2, focal):
@@ -269,7 +314,9 @@ class RotationEstimator:
         return dx / focal, response
 
     def turn(self, kf1, kf2, focal):
-        """(turn_rad, method_info) from keyframe 1 to keyframe 2, or (None, info)."""
+        """(turn_rad, method_info) from keyframe 1 to keyframe 2, or (None, info).
+        `focal` is for the frames as given to keyframe(); scaled here to the keyframe size."""
+        focal *= kf1.get('scale', 1.0)
         turn, n = self._turn_features(kf1, kf2, focal)
         if turn is not None:
             return turn, f'{n} feature matches'

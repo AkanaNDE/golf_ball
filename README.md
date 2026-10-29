@@ -179,7 +179,7 @@ Parameters: `src/golf_bot_bringup/config/tag_mission.yaml` (set `tag_size` to yo
 
 | Step | What happens |
 |---|---|
-| Scan | Turn in place ~405° in **30° steps: turn → stop → wait 0.5 s → look 1 s**. The camera runs a **short manual exposure** (`exposure_ms: 5`): blur = turn rate × exposure × focal, so at 0.4 rad/s auto exposure (~33 ms) smears a tag over ~9 px and it is lost, 5 ms gives ~1.3 px and tags are also detected **while turning** (their yaw is interpolated between the visually measured stops). |
+| Scan | Turn in place ~405° in **30° steps: turn → stop → wait 0.5 s → look 1 s**. The camera uses **auto exposure** (`exposure_ms: 0`): a normal bright image, and the robot is stopped while it looks. A short manual exposure (e.g. 5 ms) is sharper while turning but nearly black indoors (brightness 7/255 measured), so it is off by default. Detection runs at **2560x1440** with settings tuned for small tags (found down to ~21 px: a 4 cm tag to ~2.4 m). |
 | Visual yaw | The real turn between two stops is measured from the images: ORB features are matched and the median change of their bearing `atan((u−cx)/f)` is the turn. The scan stops after 360°+ of **real** rotation even if the wheels slip (the robot turned 225° while odometry said 526°) or stall; a stalled step raises the turn command, and the learned real/commanded ratio and minimum turn rate are used for the rest of the mission. |
 | Turn tracking | Scan steps are **open loop by default: turn for `scan_step_time` (2.5 s ≈ 30° on this robot)**, then the real angle is measured at the stop. Optional (`turn_track: true`): every turn closed-loop on the camera: while turning, the current frame is matched against the frame from the start of the turn (640 px copy, ~7 Hz) and the turn stops when the measured angle is reached, minus a learned coasting lead. The heading is then set from the measurement. A turn the camera says is not moving raises the turn command. |
 | Calibrate | Visual loop closure: a tag seen at stop A is seen again one *real* revolution later at stop B, so `scale = (360° + bearing_A − bearing_B) / turn(A→B)` fine-tunes the visual yaw (or calibrates odometry if the scene has no texture). (`scan_mode: continuous` uses centre crossings instead.) |
@@ -191,7 +191,8 @@ Parameters: `src/golf_bot_bringup/config/tag_mission.yaml` (set `tag_size` to yo
 
 Focal length for distances: put a tag 1.00 m in front of the camera and run
 `ros2 run golf_bot_tags tag_focal_calibration --distance 1.0 --size 0.15` on the robot; Ctrl+C when
-the printed value is stable, copy `focal_px` into the YAML.
+the printed value is stable, copy `focal_px` and `focal_width` into the YAML (focal is scaled
+automatically when `width` changes, so one calibration covers every resolution).
 
 **Camera on the laptop** (calibration, tag mission and golf ball mode alike): run
 `ros2 run golf_bot_vision image_viewer` on the laptop; it shows whichever stream is active

@@ -45,7 +45,7 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from golf_bot_tags.tag_map import PoseHistory, ScanCalibrator, TagMap
 from golf_bot_tags.tag_vision import (CameraThread, RotationEstimator, SimulatedCamera,
-                                      TagDetector, encode_jpeg, set_exposure,
+                                      TagDetector, encode_jpeg, preview_frame, set_exposure,
                                       open_camera)
 from golf_bot_tags.tour_planner import MotionModel, plan_tour, wrap
 
@@ -63,8 +63,9 @@ class TagMission(Node):
             ('camera', 'auto'), ('width', 640), ('height', 480), ('flip', False),
             ('tag_family', '36h11'), ('tag_size', 0.15),
             ('focal_px', 0.0), ('hfov_deg', 70.0),
+            ('focal_width', 0),              # frame width focal_px was measured at (0 = actual width)
             ('camera_offset', 0.15), ('camera_latency', 0.08),
-            ('exposure_ms', 5.0),            # manual exposure: short = sharp while turning (0 = auto)
+            ('exposure_ms', 0.0),            # manual exposure: short = sharp while turning (0 = auto)
             ('gain', -1.0),                  # camera gain to brighten short exposures (-1 = keep)
             ('camera_controls', ''),         # extra v4l2-ctl -c controls, if OpenCV cannot set them
             # pose estimate
@@ -163,7 +164,8 @@ class TagMission(Node):
                                                        else g('sim_auto_exposure_ms')) / 1000.0
                                                       * (g('focal_px') or 670.0)),
                                           detector=TagDetector(g('tag_family'), g('tag_size'),
-                                                               g('focal_px'), g('hfov_deg'))
+                                                               g('focal_px'), g('hfov_deg'),
+                                                               focal_width=g('focal_width'))
                                           if g('sim_render') else None,
                                           width=g('width'), height=g('height'))
             self.camera.truth_speed = lambda: self.truth_speed
@@ -171,7 +173,8 @@ class TagMission(Node):
             self.get_logger().info(f'SIMULATION: {len(tags)} tags {tags}, true yaw scale '
                                    f'{self.p["sim_yaw_scale"]}')
         else:
-            detector = TagDetector(g('tag_family'), g('tag_size'), g('focal_px'), g('hfov_deg'))
+            detector = TagDetector(g('tag_family'), g('tag_size'), g('focal_px'), g('hfov_deg'),
+                                   focal_width=g('focal_width'))
             self.detector = detector
             cam, cap = open_camera(g('camera'), g('width'), g('height'))
             real_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -1078,11 +1081,11 @@ class TagMission(Node):
         self.publish_status()
 
     def publish_image(self, frame, obs):
-        img = frame.copy()
+        img, scale = preview_frame(frame)
         for o in obs:
             if o.corners is None:
                 continue
-            pts = o.corners.astype(int).reshape(-1, 1, 2)
+            pts = (o.corners * scale).astype(int).reshape(-1, 1, 2)
             color = (0, 255, 0) if o.tag_id == self.target else (0, 200, 255)
             cv2.polylines(img, [pts], True, color, 2)
             x, y = pts[0][0]
