@@ -20,3 +20,4 @@ __pycache__/
 
 # Exported YOLO models (build them on each machine)
 *_ncnn_model/
+mission_logs/

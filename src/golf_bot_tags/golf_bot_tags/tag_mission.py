@@ -30,6 +30,8 @@ ESP32 stops the wheels by itself if this node dies (no /cmd_vel for 0.5 s).
 """
 
 import math
+import os
+import subprocess
 import time
 
 import cv2
@@ -119,6 +121,8 @@ class TagMission(Node):
             ('sim_render', False),           # render tag images + run the real detector
             ('sim_imu', False),              # simulated IMU (true yaw + slow drift) on /imu path
             ('sim_blur_linear', 0.0),        # m/s: frames blurred when driving faster than this
+            ('log_dir', '~/golf_ws/mission_logs'),  # top-view plot + path CSV after each mission
+            ('open_plot', True),             # open the plot in an image viewer when done
             ('sim_turn_lag', 0.0),           # s: simulated turn rate follows the command this slowly
                                              # (robot keeps turning after a stop -> overshoot)
         ])
@@ -134,7 +138,7 @@ class TagMission(Node):
             'approach_step', 'approach_look_time', 'approach_turn_deg', 'approach_blind_steps',
             'approach_max_corrections', 'drive_visual_steer', 'visual_steer_gain',
             'confirm_distance', 'turn_track', 'turn_track_period', 'turn_stop_lag', 'sim_imu',
-            'sim_blur_linear', 'sim_turn_lag',
+            'sim_blur_linear', 'sim_turn_lag', 'log_dir', 'open_plot',
             'arrive_tolerance', 'lost_timeout',
             'local_search_deg', 'dwell_time', 'leg_timeout_factor', 'relocalize_gain',
             'require_auto', 'exact_limit', 'simulate', 'sim_yaw_scale', 'start_delay',
@@ -164,6 +168,7 @@ class TagMission(Node):
         if self.p['simulate']:
             flat = list(g('sim_tags'))
             tags = {i: (flat[2 * i], flat[2 * i + 1]) for i in range(len(flat) // 2)}
+            self.sim_tag_truth = tags
             self.truth_rate = 0.0
             self.camera = SimulatedCamera(tags, lambda: tuple(self.truth), g('hfov_deg'),
                                           noise=g('sim_noise'), camera_offset=self.p['camera_offset'],
@@ -297,6 +302,9 @@ class TagMission(Node):
         self.last_seen = 0.0
         self.mission_start = None
         self.tour_start = None
+        self.trail, self.true_trail, self.arrivals = [], [], []   # for the top-view plot
+        self.planned_order = []
+        self.plot_saved = False
         self.travelled = 0.0
         self.planned_time = 0.0
 
@@ -402,6 +410,12 @@ class TagMission(Node):
         self.travelled += abs(v) * self.dt
         self.yaw_odom_total += w * self.dt   # unwrapped dead-reckoned yaw
         self.history.push(now, tuple(self.pose))
+        if (self.mission_start is not None and self.state not in ('IDLE', 'DONE')
+                and (not self.trail or now - self.mission_start - self.trail[-1][0] >= 0.1)):
+            self.trail.append((now - self.mission_start, self.pose[0], self.pose[1], self.pose[2],
+                               self.state))
+            if self.p['simulate']:
+                self.true_trail.append((self.truth[0], self.truth[1]))
 
     def new_observations(self):
         """Observations from a frame not processed yet, with the pose at frame time."""
@@ -677,6 +691,7 @@ class TagMission(Node):
         if reason == 'SCAN':
             self.planned_time = self.tour.time
             self.tour_start = time.monotonic()
+            self.planned_order = order          # first plan, for the path plot
         self.get_logger().info(
             f'Plan ({self.tour.method}, {1000 * (time.monotonic() - t0):.0f} ms): {order} '
             f'-> {self.tour.distance:.2f} m, {self.tour.time:.1f} s')
@@ -1089,6 +1104,7 @@ class TagMission(Node):
         if time.monotonic() - self.state_time < self.p['dwell_time']:
             return (0.0, 0.0)
         self.visited.append(self.target)
+        self.arrivals.append((self.target, self.pose[0], self.pose[1]))
         self.get_logger().info(f'Visited tag {self.target} ({len(self.visited)} done)')
         self.target = None
         self.replan('arrived')
@@ -1104,6 +1120,35 @@ class TagMission(Node):
         self.set_state('DONE', f'visited {self.visited}{unconf}, missed {self.missed}; scan {scan:.1f} s, '
                                f'tour {tour:.1f} s incl. {dwell:.0f} s dwell '
                                f'(planned {self.planned_time:.1f} s), {self.travelled:.2f} m driven')
+        self.save_mission_plot(f'visited {self.visited}, missed {self.missed}, scan {scan:.0f} s, '
+                               f'tour {tour:.0f} s (planned {self.planned_time:.0f} s), '
+                               f'{self.travelled:.1f} m driven')
+
+    def save_mission_plot(self, summary):
+        """Top-view PNG of the driven path and tag map, plus the path as CSV."""
+        if self.plot_saved or not self.trail:
+            return
+        self.plot_saved = True
+        try:
+            from golf_bot_tags import mission_plot
+            folder = os.path.expanduser(self.p['log_dir'])
+            os.makedirs(folder, exist_ok=True)
+            base = os.path.join(folder, time.strftime('mission_%Y%m%d_%H%M%S'))
+            order = self.planned_order
+            mission_plot.save_csv(base + '.csv', self.trail)
+            mission_plot.save_plot(
+                base + '.png', self.trail, self.tag_map.tags(), order, self.visited, self.missed,
+                self.unconfirmed, self.arrivals,
+                true_trail=self.true_trail or None,
+                true_tags=getattr(self, 'sim_tag_truth', None),
+                standoff=self.model.standoff,
+                title=f'Tag mission {time.strftime("%Y-%m-%d %H:%M")} (top view)\n{summary}')
+            self.get_logger().info(f'Path plot saved: {base}.png (path: {base}.csv)')
+            if self.p['open_plot'] and os.environ.get('DISPLAY'):
+                subprocess.Popen(['xdg-open', base + '.png'], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+        except Exception as e:  # a plot problem must never break the robot
+            self.get_logger().error(f'Could not save the path plot: {e}')
 
     # ------------------------------------------------------------------ outputs
     def publish_markers(self):
@@ -1172,6 +1217,9 @@ class TagMission(Node):
             self.image_pub.publish(msg)
 
     def destroy_node(self):
+        if self.mission_start is not None and not self.plot_saved:   # stopped before DONE
+            self.save_mission_plot(f'INTERRUPTED in {self.state}: visited {self.visited}, '
+                                   f'{self.travelled:.1f} m driven')
         self.camera.stop()
         super().destroy_node()
 

@@ -194,6 +194,15 @@ Focal length for distances: put a tag 1.00 m in front of the camera and run
 the printed value is stable, copy `focal_px` and `focal_width` into the YAML (focal is scaled
 automatically when `width` changes, so one calibration covers every resolution).
 
+**Tag cubes** (the same ID on every face): when two or three faces are seen at once they are
+merged into one observation from the face seen most straight on, and the distance always comes
+from the tag's *vertical* image edges (a face printed rotated by 90° or turned sideways no longer
+shrinks the measured height). Re-run the focal calibration once after this change.
+
+**Path plot**: when the mission ends (or is stopped), a top-view PNG of the driven path, the tag
+map, the visiting order and the planned order is saved with the path as CSV in
+`~/golf_ws/mission_logs/mission_YYYYmmdd_HHMMSS.png/.csv` and opened (`open_plot`, `log_dir`).
+
 **Camera on the laptop** (calibration, tag mission and golf ball mode alike): run
 `ros2 run golf_bot_vision image_viewer` on the laptop; it shows whichever stream is active
 (`/tag_calibration/...`, `/tag_mission/...`, `/golf_ball/image/compressed`, JPEG ~8 FPS).

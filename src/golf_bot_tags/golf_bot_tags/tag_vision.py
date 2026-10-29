@@ -34,9 +34,11 @@ class TagObservation:
     z: float            # m, forward distance from the camera
     x: float            # m, to the right of the optical axis
     u: float            # horizontal image position, -1 (left edge) .. +1 (right edge)
-    h_px: float         # apparent tag height in pixels
+    h_px: float         # apparent tag height in pixels (its vertical edges)
     stamp: float        # time.monotonic() of the frame
     corners: object = None  # 4x2 pixel corners (for drawing)
+    facing: float = 1.0     # width / height: 1 = face seen straight on, small = seen edge-on
+    faces: int = 1          # faces with this ID merged into this observation (tag cube)
 
     @property
     def distance(self):
@@ -204,21 +206,43 @@ class TagDetector:
         observations = []
         if ids is None:
             return observations
+        best = {}
         for c, tag_id in zip(corners, ids.ravel()):
-            c = c.reshape(4, 2)  # TL, TR, BR, BL
-            left = np.linalg.norm(c[3] - c[0])
-            right = np.linalg.norm(c[2] - c[1])
-            h_px = 0.5 * (left + right)
+            c = c.reshape(4, 2)  # TL, TR, BR, BL of the tag pattern (any in-plane rotation)
+            h_px, w_px = self._vertical_size(c)
             if h_px < self.min_side_px:
                 continue  # too small to trust the distance
+            facing = w_px / h_px
+            tag_id = int(tag_id)
+            # tag cube: the same ID on every face, two or three faces are seen at once.
+            # Keep the face seen most straight on (an edge-on face is the least accurate)
+            prev = best.get(tag_id)
+            if prev is not None and prev[2] >= facing:
+                best[tag_id] = (prev[0], prev[1], prev[2], prev[3] + 1)
+                continue
+            best[tag_id] = (c, h_px, facing, 1 if prev is None else prev[3] + 1)
+        for tag_id, (c, h_px, facing, faces) in best.items():
             cx_px = float(c[:, 0].mean())
             z = f * self.tag_size / h_px
             x = (cx_px - w / 2.0) * z / f
             u = (cx_px - w / 2.0) / (w / 2.0)
             # plain Python floats: numpy.float32 values crash ROS message fields later
-            observations.append(TagObservation(int(tag_id), float(z), float(x), float(u),
-                                               float(h_px), stamp, c))
+            observations.append(TagObservation(tag_id, float(z), float(x), float(u),
+                                               float(h_px), stamp, c, float(facing), faces))
         return observations
+
+    @staticmethod
+    def _vertical_size(c):
+        """(height, width) in px: height from the pair of opposite edges that is vertical in
+        the image. A turned robot or a tag face turned sideways (cube) foreshortens only the
+        horizontal edges; a tag printed rotated by 90 deg has its pattern edges swapped, so the
+        pattern's own left/right edges cannot be assumed vertical."""
+        edges = [c[(i + 1) % 4] - c[i] for i in range(4)]
+        lengths = [float(np.linalg.norm(e)) for e in edges]
+        vert = [abs(float(e[1])) / max(n, 1e-6) for e, n in zip(edges, lengths)]
+        if vert[1] + vert[3] >= vert[0] + vert[2]:      # edges 1-2 and 3-0 are the vertical ones
+            return 0.5 * (lengths[1] + lengths[3]), 0.5 * (lengths[0] + lengths[2])
+        return 0.5 * (lengths[0] + lengths[2]), 0.5 * (lengths[1] + lengths[3])
 
 
 class RotationEstimator:

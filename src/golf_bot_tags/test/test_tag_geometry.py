@@ -166,3 +166,29 @@ def test_phase_correlation_on_dull_blurry_scene():
         turn, resp = est._turn_phase(kf0, est.keyframe(rotated_view(scene, math.radians(deg), f)), f)
         assert turn is not None, (deg, resp)
         assert abs(math.degrees(turn) - deg) < 1.5, (deg, math.degrees(turn))
+
+
+def test_rotated_tag_uses_vertical_edges():
+    """A tag printed rotated by 90 deg (cube side) is measured on its vertical image edges."""
+    # face turned 60 deg about the vertical axis: 40 px tall, 20 px wide
+    upright = np.array([[0, 0], [20, 0], [20, 40], [0, 40]], dtype=float)   # TL TR BR BL
+    rotated = np.roll(upright, 1, axis=0)                                  # pattern turned 90 deg
+    for c in (upright, rotated):
+        h, w = TagDetector._vertical_size(c)
+        assert abs(h - 40) < 1e-6 and abs(w - 20) < 1e-6
+
+
+def test_cube_faces_merged_to_one_observation():
+    """Same ID on two cube faces in one frame -> one observation from the frontal face."""
+    det = TagDetector('36h11', 0.04, 600.0)
+    d = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
+    img = np.full((480, 640), 255, np.uint8)
+    tag = cv2.aruco.generateImageMarker(d, 3, 80)
+    img[150:230, 100:180] = tag                                   # frontal face, 80 px
+    side = cv2.resize(cv2.rotate(tag, cv2.ROTATE_90_CLOCKWISE), (40, 80),
+                      interpolation=cv2.INTER_NEAREST)            # edge-on face, rotated
+    img[150:230, 400:440] = side
+    obs = det.detect(cv2.cvtColor(img, cv2.COLOR_GRAY2BGR), 0.0)
+    assert len(obs) == 1 and obs[0].tag_id == 3 and obs[0].faces == 2
+    assert abs(obs[0].h_px - 80) < 4                              # the frontal face
+    assert abs(obs[0].z - 600.0 * 0.04 / 80) < 0.02
