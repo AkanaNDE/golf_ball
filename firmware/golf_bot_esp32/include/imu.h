@@ -23,12 +23,11 @@ class YawImu {
     // 100 kHz: the BNO055 stretches the I2C clock, which the ESP32 handles badly at 400 kHz
     Wire.begin(IMU_SDA_PIN, IMU_SCL_PIN, 100000);
     Wire.setTimeOut(20);
-    // the BNO055 needs ~650 ms after power-up before it answers: retry for up to 1.5 s
-    for (int attempt = 0; attempt < 15 && type_ == NONE; attempt++) {
-      for (uint8_t a : {0x28, 0x29}) {
-        if (read8(a, 0x00) == 0xA0) { addr_ = a; type_ = BNO055; break; }
-      }
-      if (type_ == NONE) delay(100);
+    // One quick probe: setup must stay short (a long boot breaks the micro-ROS connection
+    // when the agent resets the board). The BNO055 needs ~650 ms after power-up, so callers
+    // retry begin() later if it returns false.
+    for (uint8_t a : {0x28, 0x29}) {
+      if (read8(a, 0x00) == 0xA0) { addr_ = a; type_ = BNO055; break; }
     }
     if (type_ == NONE) {
       for (uint8_t a : {0x68, 0x69}) {
@@ -54,6 +53,10 @@ class YawImu {
       write8(0x06, 0x01); delay(50);          // PWR_MGMT_1: wake, auto clock
       write8(0x07, 0x00);                     // PWR_MGMT_2: gyro + accel on
       lsb_per_dps_ = 131.0f;                  // default +-250 dps
+    }
+    if (type_ == NONE) {      // nothing there: release the I2C driver, run without IMU
+      Wire.end();
+      return false;
     }
     if (type_ == MPU6XXX || type_ == ICM20948) calibrateBias(400);
     last_us_ = micros();

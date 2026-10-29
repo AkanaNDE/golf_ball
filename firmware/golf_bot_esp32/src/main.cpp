@@ -258,6 +258,12 @@ void setup() {
 
 void loop() {
 #if USE_IMU
+  // IMU not found yet (e.g. BNO055 still booting): retry once a second while no agent
+  static uint32_t last_imu_try_ms = 0;
+  if (!imu_ok && agent_state != AGENT_CONNECTED && millis() - last_imu_try_ms >= 1000) {
+    last_imu_try_ms = millis();
+    imu_ok = imu.begin();
+  }
   if (imu_ok) {
     static uint32_t last_imu_ms = 0;
     if (millis() - last_imu_ms >= 10) {

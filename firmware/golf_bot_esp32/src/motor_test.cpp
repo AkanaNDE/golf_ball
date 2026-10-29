@@ -58,7 +58,10 @@ void printHelp() {
 void setup() {
   Serial.begin(115200);
   driveHwSetup();
-  imu_ok = imu.begin();   // keep the robot still: gyro bias is measured now
+  for (int i = 0; i < 15 && !imu_ok; i++) {   // BNO055 needs ~650 ms after power-up
+    imu_ok = imu.begin();   // keep the robot still: gyro bias is measured now
+    if (!imu_ok) delay(100);
+  }
   stopAllMotors();
   delay(300);
   printHelp();
