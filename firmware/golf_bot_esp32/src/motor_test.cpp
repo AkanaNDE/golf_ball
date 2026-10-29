@@ -15,6 +15,10 @@
 
 #include "config.h"
 #include "drive_hw.h"
+#include "imu.h"
+
+YawImu imu;
+bool imu_ok = false;
 
 float duty = 0.3f;
 int active_mask = 0;          // bit i = motor i running
@@ -54,9 +58,13 @@ void printHelp() {
 void setup() {
   Serial.begin(115200);
   driveHwSetup();
+  imu_ok = imu.begin();   // keep the robot still: gyro bias is measured now
   stopAllMotors();
   delay(300);
   printHelp();
+  if (imu_ok) Serial.printf("IMU: %s at 0x%02X (turn the robot LEFT: yaw must go UP)\n",
+                            imu.name(), imu.address());
+  else Serial.println("IMU: NOT FOUND - check SDA=GPIO23, SCL=GPIO22, 3.3V, GND");
 }
 
 void loop() {
@@ -83,6 +91,12 @@ void loop() {
 
   if (active_mask && (int32_t)(millis() - run_until_ms) >= 0) stopRun();
 
+  static uint32_t last_imu_ms = 0;
+  if (imu_ok && millis() - last_imu_ms >= 10) {
+    last_imu_ms = millis();
+    imu.update(active_mask == 0);
+  }
+
   // Status print
   uint32_t now = millis();
   if (now - last_print_ms >= 250) {
@@ -94,6 +108,7 @@ void loop() {
       last_counts[i] = count;
       Serial.printf("%s cnt=%7lld %6.2f rad/s | ", MOTOR_NAMES[i], (long long)count, rad_s);
     }
+    if (imu_ok) Serial.printf("IMU yaw %7.1f deg", imu.yaw() * RAD_TO_DEG);
     Serial.println();
   }
 }

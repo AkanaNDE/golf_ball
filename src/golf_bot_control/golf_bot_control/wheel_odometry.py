@@ -7,6 +7,10 @@ Publishes:
   /odom       nav_msgs/Odometry
   TF          odom -> base_link (if publish_tf is true)
 
+Heading: from the IMU (/imu, sensor_msgs/Imu yaw) when it is publishing (use_imu), because
+skid-steer wheels slip sideways when turning and wheel-based heading drifts fast; the wheels
+then only give the forward speed. Without IMU messages the wheels give both.
+
 wheel_radius and track_width must match the values in the firmware config.h.
 For skid steer, track_width is the *effective* track: calibrate it by commanding
 a 360 degree turn in place and scaling until odometry reports exactly one turn.
@@ -19,6 +23,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from geometry_msgs.msg import TransformStamped, Vector3
+from sensor_msgs.msg import Imu
 from nav_msgs.msg import Odometry
 from tf2_ros import TransformBroadcaster
 
@@ -39,6 +44,8 @@ class WheelOdometry(Node):
             ('base_frame', 'base_link'),
             ('publish_tf', True),
             ('max_dt', 0.5),
+            ('use_imu', True),
+            ('imu_timeout', 0.5),
         ])
         p = lambda name: self.get_parameter(name).value  # noqa: E731
         self.wheel_radius = p('wheel_radius')
@@ -47,16 +54,37 @@ class WheelOdometry(Node):
         self.base_frame = p('base_frame')
         self.publish_tf = p('publish_tf')
         self.max_dt = p('max_dt')
+        self.use_imu = p('use_imu')
+        self.imu_timeout = p('imu_timeout')
 
         self.odom_pub = self.create_publisher(Odometry, 'odom', 10)
         self.tf_broadcaster = TransformBroadcaster(self) if self.publish_tf else None
         # ESP32 publishes wheel_vel best-effort: subscribe with a matching (sensor data) QoS
         self.create_subscription(Vector3, 'wheel_vel', self.on_wheel_vel, qos_profile_sensor_data)
+        self.create_subscription(Imu, 'imu', self.on_imu, qos_profile_sensor_data)
+        self.imu_yaw = None        # unwrapped IMU yaw (rad)
+        self.imu_rate = 0.0
+        self.imu_time = None
+        self.imu_used = None       # IMU yaw at the last odometry update
 
         self.x = 0.0
         self.y = 0.0
         self.yaw = 0.0
         self.last_time = None
+
+    def on_imu(self, msg):
+        q = msg.orientation
+        yaw = 2.0 * math.atan2(q.z, q.w)
+        if self.imu_yaw is None:
+            self.imu_yaw = yaw
+        else:  # unwrap
+            self.imu_yaw += math.atan2(math.sin(yaw - self.imu_yaw), math.cos(yaw - self.imu_yaw))
+        self.imu_rate = msg.angular_velocity.z
+        self.imu_time = self.get_clock().now()
+
+    def imu_fresh(self, now):
+        return (self.use_imu and self.imu_time is not None
+                and (now - self.imu_time).nanoseconds * 1e-9 < self.imu_timeout)
 
     def on_wheel_vel(self, msg):
         now = self.get_clock().now()
@@ -75,12 +103,23 @@ class WheelOdometry(Node):
         v_right = msg.y * self.wheel_radius
         v = (v_right + v_left) / 2.0
         w = (v_right - v_left) / self.track_width
+        dyaw = w * dt
+        if self.imu_fresh(now):
+            if self.imu_used is not None:
+                dyaw = self.imu_yaw - self.imu_used   # heading change measured by the IMU
+            else:
+                self.get_logger().info('Heading from the IMU')
+            self.imu_used = self.imu_yaw
+            w = self.imu_rate
+        elif self.imu_used is not None:
+            self.get_logger().warn('IMU silent: heading from the wheels')
+            self.imu_used = None
 
         # Midpoint integration
-        mid_yaw = self.yaw + w * dt / 2.0
+        mid_yaw = self.yaw + dyaw / 2.0
         self.x += v * math.cos(mid_yaw) * dt
         self.y += v * math.sin(mid_yaw) * dt
-        self.yaw = math.atan2(math.sin(self.yaw + w * dt), math.cos(self.yaw + w * dt))
+        self.yaw = math.atan2(math.sin(self.yaw + dyaw), math.cos(self.yaw + dyaw))
 
         qx, qy, qz, qw = yaw_to_quaternion(self.yaw)
         stamp = now.to_msg()

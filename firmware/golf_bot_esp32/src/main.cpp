@@ -20,9 +20,14 @@
 
 #include <geometry_msgs/msg/twist.h>
 #include <geometry_msgs/msg/vector3.h>
+#include <sensor_msgs/msg/imu.h>
 
 #include "config.h"
 #include "drive_hw.h"
+#include "imu.h"
+
+YawImu imu;
+bool imu_ok = false;
 
 #if !defined(MICRO_ROS_TRANSPORT_ARDUINO_SERIAL)
 #error This firmware expects board_microros_transport = serial
@@ -75,6 +80,9 @@ float updateWheel(int i, float goal, float dt, bool stopping) {
     w.integral = 0.0f;
     return 0.0f;
   }
+#if !ENCODER_PID
+  return w.target / MAX_WHEEL_SPEED;  // encoders measured only (see config.h)
+#endif
   float error = w.target - w.measured;
   w.integral = constrain(w.integral + PID_KI * error * dt, -PID_I_LIMIT, PID_I_LIMIT);
   return w.target / MAX_WHEEL_SPEED + PID_KP * error + w.integral;
@@ -144,6 +152,9 @@ rcl_publisher_t wheel_vel_pub;
 
 geometry_msgs__msg__Twist cmd_vel_msg;
 geometry_msgs__msg__Vector3 wheel_vel_msg;
+rcl_publisher_t imu_pub;
+sensor_msgs__msg__Imu imu_msg;
+char imu_frame[] = "imu_link";
 
 enum AgentState { WAITING_AGENT, AGENT_AVAILABLE, AGENT_CONNECTED, AGENT_DISCONNECTED };
 AgentState agent_state = WAITING_AGENT;
@@ -174,6 +185,16 @@ void controlTimerCallback(rcl_timer_t *timer, int64_t last_call_time) {
     wheel_vel_msg.y = (wheel_ctrl[WHEEL_FR].measured + wheel_ctrl[WHEEL_RR].measured) / 2.0f;
     wheel_vel_msg.z = 0.0;
     RCSOFTCHECK(rcl_publish(&wheel_vel_pub, &wheel_vel_msg, NULL));
+    if (imu_ok) {
+      // yaw only: orientation = rotation about z, angular_velocity.z = yaw rate
+      float yaw = imu.yaw();
+      imu_msg.orientation.x = 0.0;
+      imu_msg.orientation.y = 0.0;
+      imu_msg.orientation.z = sinf(yaw / 2.0f);
+      imu_msg.orientation.w = cosf(yaw / 2.0f);
+      imu_msg.angular_velocity.z = imu.rate();
+      RCSOFTCHECK(rcl_publish(&imu_pub, &imu_msg, NULL));
+    }
   }
 }
 
@@ -186,6 +207,8 @@ bool createEntities() {
     &cmd_vel_sub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist), "cmd_vel"));
   RCCHECK(rclc_publisher_init_best_effort(
     &wheel_vel_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Vector3), "wheel_vel"));
+  RCCHECK(rclc_publisher_init_best_effort(
+    &imu_pub, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, Imu), "imu"));
 
   RCCHECK(rclc_timer_init_default2(
     &control_timer, &support, RCL_MS_TO_NS(CONTROL_PERIOD_MS), controlTimerCallback, true));
@@ -202,6 +225,7 @@ void destroyEntities() {
   (void)rmw_uros_set_context_entity_destroy_session_timeout(rmw_context, 0);
 
   RCSOFTCHECK(rcl_publisher_fini(&wheel_vel_pub, &node));
+  RCSOFTCHECK(rcl_publisher_fini(&imu_pub, &node));
   RCSOFTCHECK(rcl_subscription_fini(&cmd_vel_sub, &node));
   RCSOFTCHECK(rcl_timer_fini(&control_timer));
   RCSOFTCHECK(rclc_executor_fini(&executor));
@@ -216,6 +240,16 @@ void setup() {
   pinMode(STATUS_LED_PIN, OUTPUT);
   driveHwSetup();
   stopAllMotors();
+#if USE_IMU
+  imu_ok = imu.begin();   // robot must stand still now: gyro bias is measured
+#endif
+  imu_msg.header.frame_id.data = imu_frame;
+  imu_msg.header.frame_id.size = strlen(imu_frame);
+  imu_msg.header.frame_id.capacity = sizeof(imu_frame);
+  imu_msg.orientation_covariance[0] = -1.0;       // roll/pitch not provided...
+  imu_msg.orientation_covariance[8] = 0.0025;     // ...yaw is (sigma ~3 deg)
+  imu_msg.angular_velocity_covariance[8] = 0.0004;
+  imu_msg.linear_acceleration_covariance[0] = -1.0;  // not provided
 
   Serial.begin(SERIAL_BAUD);
   set_microros_serial_transports(Serial);
@@ -223,6 +257,17 @@ void setup() {
 }
 
 void loop() {
+#if USE_IMU
+  if (imu_ok) {
+    static uint32_t last_imu_ms = 0;
+    if (millis() - last_imu_ms >= 10) {
+      last_imu_ms = millis();
+      bool still = (millis() - last_cmd_ms) >= CMD_VEL_TIMEOUT_MS ||
+                   (cmd_linear == 0.0f && cmd_angular == 0.0f);
+      imu.update(still);
+    }
+  }
+#endif
   switch (agent_state) {
     case WAITING_AGENT:
       EXECUTE_EVERY_N_MS(500,

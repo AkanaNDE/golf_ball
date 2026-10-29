@@ -24,7 +24,10 @@ tag_mission:
                               # "auto_exposure=1,exposure_time_absolute=50"
 
     # --- pose estimate -----------------------------------------------------------
-    pose_source: cmd          # cmd: integrate /cmd_vel (no encoders) | odom: /odom twist
+    pose_source: cmd          # forward speed: cmd (/cmd_vel) | odom (encoders, via wheel_odometry)
+                              # -> switch to odom once motor_test shows correct encoder counts
+    heading_source: auto      # auto: BNO055 /imu when it publishes (else the command) | cmd
+    imu_timeout: 0.5          # s without /imu -> back to the command
     yaw_scale: 1.0            # initial true/commanded yaw ratio (re-measured every scan)
     linear_scale: 1.0         # true/commanded forward speed ratio
 

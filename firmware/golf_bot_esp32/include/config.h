@@ -40,7 +40,11 @@
 // Easiest: run motor_test, turn one wheel exactly 1 revolution by hand,
 // and put the count it shows into ENCODER_TICKS_PER_REV directly.
 // ---------------------------------------------------------------------------
-#define USE_ENCODERS          0     // 1 once the encoder cables are connected
+#define USE_ENCODERS          1     // encoders wired: wheel speed is measured
+// Speed PID on the encoders. Keep 0 until motor_test shows every count going UP while the
+// wheel turns forward (fix invert_encoder first): with a wrong sign the PID speeds the motor
+// up instead of correcting it. 0 = open loop feedforward, encoders only measured/published.
+#define ENCODER_PID           0
 #define ENCODER_PPR           7       // pulses per motor revolution (per phase)
 #define GEAR_RATIO            19.2f   // gearbox ratio of your 36GP-555 version
 #define ENCODER_TICKS_PER_REV (ENCODER_PPR * 4 * GEAR_RATIO)
@@ -67,5 +71,13 @@
 #define CONTROL_PERIOD_MS    20     // 50 Hz control loop
 #define PUBLISH_EVERY_N      2      // publish /wheel_vel at 25 Hz
 #define STATUS_LED_PIN       2      // on-board LED: blink = waiting for agent, on = connected
+
+// ---------------------------------------------------------------------------
+// IMU (I2C, model auto-detected: BNO055, MPU6050/6500/9250, ICM-20948)
+// ---------------------------------------------------------------------------
+#define USE_IMU              1
+#define IMU_SDA_PIN          23
+#define IMU_SCL_PIN          22
+#define IMU_YAW_SIGN         1.0f   // -1 if yaw goes DOWN when the robot turns left (IMU upside down)
 
 #define SERIAL_BAUD          115200 // must match micro_ros_agent -b

@@ -38,7 +38,8 @@ from geometry_msgs.msg import Point, Twist
 from nav_msgs.msg import Odometry
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from sensor_msgs.msg import CompressedImage
+from rclpy.qos import qos_profile_sensor_data
+from sensor_msgs.msg import CompressedImage, Imu
 from std_msgs.msg import Bool, String
 from visualization_msgs.msg import Marker, MarkerArray
 
@@ -67,7 +68,9 @@ class TagMission(Node):
             ('gain', -1.0),                  # camera gain to brighten short exposures (-1 = keep)
             ('camera_controls', ''),         # extra v4l2-ctl -c controls, if OpenCV cannot set them
             # pose estimate
-            ('pose_source', 'cmd'),          # 'cmd' (/cmd_vel) or 'odom' (/odom twist)
+            ('pose_source', 'cmd'),          # forward speed from 'cmd' (/cmd_vel) or 'odom' (encoders)
+            ('heading_source', 'auto'),      # 'auto': IMU (/imu) when it publishes, else command
+            ('imu_timeout', 0.5),
             ('yaw_scale', 1.0), ('linear_scale', 1.0),
             # scan
             ('scan_mode', 'step'),           # step: turn-stop-look (sharp images) | continuous
@@ -107,19 +110,20 @@ class TagMission(Node):
             ('sim_yaw_scale_fast', -1.0),    # true/commanded yaw for |w| > 0.5 (-1 = same)
             ('sim_visual_noise_deg', 0.7),   # noise of the simulated visual yaw per stop
             ('sim_render', False),           # render tag images + run the real detector
+            ('sim_imu', False),              # simulated IMU (true yaw + slow drift) on /imu path
             ('sim_blur_linear', 0.0),        # m/s: frames blurred when driving faster than this
         ])
         g = lambda n: self.get_parameter(n).value  # noqa: E731
         self.p = {n: g(n) for n in [
             'camera_offset', 'camera_latency', 'pose_source', 'yaw_scale', 'linear_scale',
-            'exposure_ms',
+            'exposure_ms', 'heading_source', 'imu_timeout',
             'scan_speed', 'scan_extra_deg', 'scan_max_deg', 'scan_mode', 'scan_step_deg',
             'scan_settle_time', 'scan_look_time', 'scan_visual_yaw', 'scan_speed_max',
             'scan_step_time',
             'sim_min_turn_rate', 'sim_visual_noise_deg', 'sim_yaw_scale_fast', 'k_heading', 'k_distance', 'v_min',
             'w_min', 'turn_in_place_deg', 'align_tolerance_deg', 'align_step_deg',
             'approach_step', 'approach_look_time', 'approach_turn_deg', 'approach_blind_steps',
-            'confirm_distance', 'turn_track', 'turn_track_period', 'turn_stop_lag',
+            'confirm_distance', 'turn_track', 'turn_track_period', 'turn_stop_lag', 'sim_imu',
             'sim_blur_linear',
             'arrive_tolerance', 'lost_timeout',
             'local_search_deg', 'dwell_time', 'leg_timeout_factor', 'relocalize_gain',
@@ -136,6 +140,7 @@ class TagMission(Node):
         self.truth = [0.0, 0.0, 0.0]
         self.truth_turned = 0.0        # simulated true yaw, unwrapped
         self.truth_speed = 0.0
+        self.sim_t0 = time.monotonic()
         self.latest_frame = None       # newest camera frame (for visual yaw)
         self.rotation = RotationEstimator()
         self.vel = (0.0, 0.0)
@@ -195,6 +200,12 @@ class TagMission(Node):
             self.create_subscription(Odometry, 'odom', self.on_odom, 10)
         else:
             self.create_subscription(Twist, 'cmd_vel', self.on_cmd, 10)
+        self.create_subscription(Imu, 'imu', self.on_imu, qos_profile_sensor_data)
+        self.imu_total = None          # unwrapped IMU yaw
+        self.imu_time = 0.0
+        self.imu_prev = None
+        self.imu_active = False
+        self.imu_announced = False
         self.create_timer(self.dt, self.on_timer)
         self.create_timer(0.5, self.publish_markers)
 
@@ -292,6 +303,15 @@ class TagMission(Node):
                 self.leg_start = time.monotonic()
         self.stopped = msg.data
 
+    def on_imu(self, msg):
+        q = msg.orientation
+        yaw = 2.0 * math.atan2(q.z, q.w)
+        if self.imu_total is None:
+            self.imu_total = yaw
+        else:
+            self.imu_total += wrap(yaw - self.imu_total)
+        self.imu_time = time.monotonic()
+
     def on_cmd(self, msg):
         self.vel = (msg.linear.x, msg.angular.z)
         self.vel_time = time.monotonic()
@@ -317,8 +337,25 @@ class TagMission(Node):
             self.truth[0] += v * math.cos(self.truth[2] + tw * self.dt / 2) * self.dt
             self.truth[1] += v * math.sin(self.truth[2] + tw * self.dt / 2) * self.dt
             self.truth[2] = wrap(self.truth[2] + tw * self.dt)
+            if self.p['sim_imu']:   # like a BNO055: true yaw plus a slow drift (0.5 deg/min)
+                self.imu_total = self.truth_turned + math.radians(0.5 / 60.0) * (now - self.sim_t0)
+                self.imu_time = now
         v *= self.p['linear_scale']
         w *= self.yaw_scale
+        # Heading from the IMU when available: measures the real turn (slip, stall, coasting)
+        self.imu_active = (self.p['heading_source'] != 'cmd' and self.imu_total is not None
+                           and now - self.imu_time < self.p['imu_timeout'])
+        if self.imu_active:
+            if not self.imu_announced:
+                self.get_logger().info('Heading from the IMU (/imu)')
+                self.imu_announced = True
+            w = 0.0 if self.imu_prev is None else (self.imu_total - self.imu_prev) / self.dt
+            self.imu_prev = self.imu_total
+        else:
+            if self.imu_announced:
+                self.get_logger().warn('IMU silent: heading from the command again')
+                self.imu_announced = False
+            self.imu_prev = None
         x, y, yaw = self.pose
         self.pose = [x + v * math.cos(yaw + w * self.dt / 2) * self.dt,
                      y + v * math.sin(yaw + w * self.dt / 2) * self.dt,
@@ -495,6 +532,9 @@ class TagMission(Node):
             self.scan_kf = kf
         else:
             return  # no image yet
+        if self.imu_active and self.scan_stop > 0:
+            cam = f', camera {math.degrees(turn):+.1f}' if turn is not None else ''
+            turn, how = odom_step, f'IMU{cam}'     # scan_turned already follows the IMU
         if self.scan_stop == 0:
             step_true = 0.0
         elif turn is not None:
@@ -693,7 +733,7 @@ class TagMission(Node):
         """Robot is still again: set the heading from the measured turn (not dead reckoning)."""
         self.tt_last_try = 0.0                     # measure now, on the newest (sharp) frame
         meas = self.turn_progress()
-        if meas is None:
+        if meas is None or self.imu_active:      # the IMU already tracks the heading
             return
         self.pose[2] = wrap(self.tt_yaw0 + meas)
         self.learn_turn_lag(meas)
@@ -745,7 +785,7 @@ class TagMission(Node):
             if self.align_kf is not None:          # finish the previous step: measure it
                 real = self.visual_turn(self.align_kf, kf)
                 est = self.yaw_odom_total - self.align_odom0
-                if real is not None:
+                if real is not None and not self.imu_active:
                     self.pose[2] = wrap(self.align_yaw0 + real)
                     self.learn_turn_lag(real)
                     if abs(est) > math.radians(5) and abs(real) > math.radians(2):

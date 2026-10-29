@@ -82,6 +82,14 @@ will not boot (flash voltage set to 1.8 V). Fix either by moving P1B to free GPI
 (and changing `M1_CONFIG`), or by burning the efuse once:
 `espefuse.py --port /dev/ttyUSB0 set_flash_voltage 3.3V`.
 
+## Encoders and IMU
+Encoders on every motor (M1 13/12, M2 14/27, M3 26/25, M4 33/32) and a BNO055 on I2C
+(SDA GPIO23, SCL GPIO22, auto-detected; MPU6050/9250 and ICM-20948 also work). The ESP32
+publishes `/imu` (sensor_msgs/Imu, yaw + yaw rate, IMUPLUS fusion) next to `/wheel_vel`.
+`wheel_odometry` and `tag_mission` take the heading from the IMU and fall back to the
+wheels / command if it goes silent. The encoder speed PID stays off (`ENCODER_PID 0`) until
+motor_test shows every encoder counting up while its wheel turns forward.
+
 ## Motor test (no ROS)
 Lift the wheels, then:
 ```bash

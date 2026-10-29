@@ -40,6 +40,7 @@ wheel_odometry:
     odom_frame: odom
     base_frame: base_link
     publish_tf: true
+    use_imu: true           # heading from the BNO055 (/imu); wheels only for speed
 
 golf_ball_detector:
   ros__parameters:
