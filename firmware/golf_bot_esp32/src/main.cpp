@@ -5,6 +5,7 @@
 //   /cmd_vel    geometry_msgs/Twist   linear.x (m/s), angular.z (rad/s)
 // Publishes:
 //   /wheel_vel  geometry_msgs/Vector3 x = left, y = right wheel speed (rad/s, side average)
+//                                     z = PWM duty sent to the front left motor (-1..1), for debugging
 //
 // 4-wheel differential drive (skid steer): see controlStep() for the equations.
 // Each wheel has its own encoder and speed PID.
@@ -52,6 +53,7 @@ struct WheelControl {
 };
 
 WheelControl wheel_ctrl[4];
+float last_duty[4] = {0, 0, 0, 0};  // PWM duty actually written, for /wheel_vel.z
 
 // Commands from ROS
 volatile float cmd_linear = 0.0f;
@@ -126,7 +128,8 @@ void controlStep(float dt) {
 
   bool stopping = !cmd_fresh || (v == 0.0f && w == 0.0f);
   for (int i = 0; i < 4; i++) {
-    motorWrite(i, withMinDuty(updateWheel(i, goal[i], dt, stopping)));
+    last_duty[i] = withMinDuty(updateWheel(i, goal[i], dt, stopping));
+    motorWrite(i, last_duty[i]);
   }
 }
 
@@ -183,7 +186,7 @@ void controlTimerCallback(rcl_timer_t *timer, int64_t last_call_time) {
     tick = 0;
     wheel_vel_msg.x = (wheel_ctrl[WHEEL_FL].measured + wheel_ctrl[WHEEL_RL].measured) / 2.0f;
     wheel_vel_msg.y = (wheel_ctrl[WHEEL_FR].measured + wheel_ctrl[WHEEL_RR].measured) / 2.0f;
-    wheel_vel_msg.z = 0.0;
+    wheel_vel_msg.z = last_duty[WHEEL_FL];
     RCSOFTCHECK(rcl_publish(&wheel_vel_pub, &wheel_vel_msg, NULL));
     if (imu_ok) {
       // yaw only: orientation = rotation about z, angular_velocity.z = yaw rate
