@@ -76,6 +76,14 @@ def set_exposure(cap, exposure_ms=0.0, gain=-1.0, dev=None, controls=''):
     return ', '.join(notes) if notes else 'auto exposure'
 
 
+def _video_name(dev):
+    try:
+        with open(f'/sys/class/video4linux/{dev[5:]}/name') as f:
+            return f.read().strip()
+    except OSError:
+        return ''
+
+
 def open_camera(camera='auto', width=640, height=480, fourcc='MJPG'):
     """Open a V4L2 camera; 'auto' tries every /dev/video* until one returns a frame.
 
@@ -85,8 +93,15 @@ def open_camera(camera='auto', width=640, height=480, fourcc='MJPG'):
     import glob
     import re
     camera = str(camera)
-    devs = (sorted(glob.glob('/dev/video*'), key=lambda d: int(d[10:] or 0))
-            if camera == 'auto' else [camera])
+    all_devs = sorted(glob.glob('/dev/video*'), key=lambda d: int(d[10:] or 0))
+    if camera == 'auto':
+        devs = all_devs
+    elif camera.startswith('/dev/') or camera.isdigit():
+        devs = [camera]
+    else:
+        # a name such as "UGREEN": match the V4L2 device name, so the laptop's built-in
+        # webcam is not picked by accident; nothing matches -> fall back to 'auto'
+        devs = [d for d in all_devs if camera.lower() in _video_name(d).lower()] or all_devs
     for dev in devs:
         if re.fullmatch(r'/dev/video\d+', dev):
             index = int(dev[len('/dev/video'):])

@@ -4,7 +4,7 @@
 tag_mission:
   ros__parameters:
     # --- camera and tags -------------------------------------------------------
-    camera: auto              # first /dev/video* that gives a frame, or "/dev/video0"
+    camera: UGREEN            # device name (part of it), "auto" = first working /dev/video*, or "/dev/video2"
     width: 1280               # 1280x720 doubles the tag size in pixels vs 640x480:
     height: 720               # a 15 cm tag at 5 m is ~26 px instead of ~13 px (limit ~12)
     flip: false

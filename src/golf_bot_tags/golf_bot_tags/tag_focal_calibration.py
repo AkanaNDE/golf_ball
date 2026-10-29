@@ -113,7 +113,7 @@ def main(args=None):
     ap.add_argument('--distance', type=float, required=True, help='camera-to-tag distance (m)')
     ap.add_argument('--size', type=float, default=0.15, help='black square side length (m)')
     ap.add_argument('--family', default='36h11')
-    ap.add_argument('--camera', default='auto', help='auto, index or /dev/videoN')
+    ap.add_argument('--camera', default='auto', help='auto, index, /dev/videoN or a device name such as UGREEN')
     ap.add_argument('--width', type=int, default=1280, help='use the same size as tag_mission')
     ap.add_argument('--height', type=int, default=720)
     a, _ = ap.parse_known_args(sys.argv[1:] if args is None else args)
