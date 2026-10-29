@@ -15,7 +15,7 @@
 // Encoders: 36GP-555 magnetic encoder on every motor (phase A / phase B)
 //
 //                 PWM  DIR  ENC_A  ENC_B  invert_motor  invert_encoder
-#define M1_CONFIG  16,  15,  13,    12,    true,         false
+#define M1_CONFIG  16,  15,  13,    34,    true,         false   // PhaseB_1 moved off strapping pin GPIO12
 #define M2_CONFIG  18,  17,  14,    27,    false,         true
 #define M3_CONFIG  21,  19,  26,    25,    true,         false
 #define M4_CONFIG  4,   5,   33,    32,    false,         true    // moved from GPIO23/22 (no signal at D2 ch2)
