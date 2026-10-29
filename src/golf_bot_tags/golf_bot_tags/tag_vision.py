@@ -327,32 +327,77 @@ class RotationEstimator:
 
 
 class CameraThread:
-    """Reads the camera and runs detection in the background; keeps only the newest result."""
+    """Camera in the background, two threads, keeps only the newest result.
 
-    def __init__(self, cap, detector, flip=False):
+    grab:   reads frames as fast as the camera gives them and keeps only the newest, with
+            the time it was captured. Without this, at 2560x1440 (detection ~300 ms, camera
+            ~90 ms per frame) frames queue up in the driver and the robot "looks" at a
+            blurred frame from while it was still turning, stamped as if it were new.
+    detect: runs the tag detector on the newest grabbed frame.
+    `brightness` > 0: digital gain lifts dark frames (short exposure) to this mean level.
+    """
+
+    def __init__(self, cap, detector, flip=False, brightness=0.0, max_digital_gain=6.0):
         self.cap = cap
         self.detector = detector
         self.flip = flip
+        self.brightness = brightness
+        self.max_digital_gain = max_digital_gain
+        self.digital_gain = 1.0
         self.thorough = True    # set False while the robot moves (fast detection)
         self.restore_auto_exposure = False
+        self.restore_gain = None   # camera gain to put back on stop (we raise it)
         self.lock = threading.Lock()
+        self.new_frame = threading.Condition(self.lock)
+        self.grabbed = None     # (frame, capture time, number)
+        self.grab_count = 0
         self.frame = None
         self.observations = []
         self.stamp = 0.0
         self.frames = 0
         self.running = True
+        self.grab_thread = threading.Thread(target=self._grab, daemon=True)
         self.thread = threading.Thread(target=self._run, daemon=True)
+        self.grab_thread.start()
         self.thread.start()
 
-    def _run(self):
+    def _grab(self):
         while self.running:
-            ok, frame = self.cap.read()
-            stamp = time.monotonic()
+            ok = self.cap.grab()
+            stamp = time.monotonic()   # grab() returns when the frame has arrived
             if not ok:
                 time.sleep(0.05)
                 continue
+            ok, frame = self.cap.retrieve()
+            if not ok:
+                continue
+            with self.lock:
+                self.grab_count += 1
+                self.grabbed = (frame, stamp, self.grab_count)
+                self.new_frame.notify()
+
+    def _brighten(self, frame):
+        mean = float(cv2.mean(frame[::8, ::8])[0])   # subsampled: fast at 2560x1440
+        if mean > 1.0:
+            target = min(self.max_digital_gain, max(1.0, self.brightness / mean))
+            self.digital_gain = 0.7 * self.digital_gain + 0.3 * target   # no flicker
+        if self.digital_gain > 1.05:
+            frame = cv2.convertScaleAbs(frame, alpha=self.digital_gain)
+        return frame
+
+    def _run(self):
+        done = 0
+        while self.running:
+            with self.lock:
+                while self.running and (self.grabbed is None or self.grabbed[2] == done):
+                    self.new_frame.wait(0.2)
+                if not self.running:
+                    return
+                frame, stamp, done = self.grabbed
             if self.flip:
                 frame = cv2.rotate(frame, cv2.ROTATE_180)
+            if self.brightness > 0:
+                frame = self._brighten(frame)
             obs = self.detector.detect(frame, stamp, self.thorough)
             with self.lock:
                 self.frame, self.observations, self.stamp = frame, obs, stamp
@@ -364,9 +409,14 @@ class CameraThread:
 
     def stop(self):
         self.running = False
+        with self.lock:
+            self.new_frame.notify_all()
         self.thread.join(timeout=1.0)
+        self.grab_thread.join(timeout=1.0)
         if self.restore_auto_exposure:  # manual exposure would stay on the camera otherwise
             self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+        if self.restore_gain is not None:
+            self.cap.set(cv2.CAP_PROP_GAIN, self.restore_gain)
         self.cap.release()
 
 

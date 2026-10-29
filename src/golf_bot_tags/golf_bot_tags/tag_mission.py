@@ -45,8 +45,8 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from golf_bot_tags.tag_map import PoseHistory, ScanCalibrator, TagMap
 from golf_bot_tags.tag_vision import (CameraThread, RotationEstimator, SimulatedCamera,
-                                      TagDetector, encode_jpeg, preview_frame, set_exposure,
-                                      open_camera)
+                                      TagDetector, encode_jpeg, focal_from_hfov, preview_frame,
+                                      open_camera, set_exposure)
 from golf_bot_tags.tour_planner import MotionModel, plan_tour, wrap
 
 
@@ -67,6 +67,9 @@ class TagMission(Node):
             ('camera_offset', 0.15), ('camera_latency', 0.08),
             ('exposure_ms', 0.0),            # manual exposure: short = sharp while turning (0 = auto)
             ('gain', -1.0),                  # camera gain to brighten short exposures (-1 = keep)
+            ('brightness', 0.0),             # digital gain lifts dark frames to this mean (0 = off)
+            ('max_blur_px', 0.0),            # turn no faster than this much motion blur (0 = off)
+            ('auto_exposure_guess_ms', 33.0),  # exposure assumed for max_blur_px in auto exposure
             ('camera_controls', ''),         # extra v4l2-ctl -c controls, if OpenCV cannot set them
             # pose estimate
             ('pose_source', 'cmd'),          # forward speed from 'cmd' (/cmd_vel) or 'odom' (encoders)
@@ -182,15 +185,35 @@ class TagMission(Node):
             if (real_w, real_h) != (g('width'), g('height')):
                 self.get_logger().warn(f'Camera gives {real_w}x{real_h}, not {g("width")}x'
                                        f'{g("height")} (focal is computed for the real size)')
+            gain_before = cap.get(cv2.CAP_PROP_GAIN)
             exposure = set_exposure(cap, g('exposure_ms'), g('gain'), cam, g('camera_controls'))
-            self.camera = CameraThread(cap, detector, g('flip'))
+            self.camera = CameraThread(cap, detector, g('flip'), brightness=g('brightness'))
             self.camera.restore_auto_exposure = g('exposure_ms') > 0
+            if g('gain') >= 0:
+                self.camera.restore_gain = gain_before
             self.get_logger().info(
                 f'Camera {cam}, tag {g("tag_family")} {g("tag_size") * 100:.1f} cm, '
                 f'{int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}, '
-                f'focal {detector.focal(int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))):.0f} px, {exposure}')
+                f'focal {detector.focal(int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))):.0f} px, {exposure}'
+                + (f', digital brightness {g("brightness"):.0f}' if g('brightness') > 0 else ''))
         self.last_frame = -1
         self.last_image_sent = 0.0     # time the last JPEG was published
+
+        # Motion blur (px) = turn rate (rad/s) x exposure (s) x focal (px): limit the turn rate
+        self.w_blur = float('inf')
+        if g('max_blur_px') > 0:
+            exposure_s = (g('exposure_ms') if g('exposure_ms') > 0 else g('auto_exposure_guess_ms')) / 1000.0
+            focal = (g('focal_px') * g('width') / g('focal_width')
+                     if g('focal_px') > 0 and g('focal_width') > 0 else g('focal_px')) \
+                or focal_from_hfov(g('width'), g('hfov_deg'))
+            self.w_blur = g('max_blur_px') / (exposure_s * focal)
+            msg = (f'Turn rate limited to {self.w_blur:.2f} rad/s ({math.degrees(self.w_blur):.0f} deg/s) '
+                   f'for <= {g("max_blur_px"):.1f} px blur at {exposure_s * 1000:.0f} ms exposure')
+            if self.w_blur < self.p['w_min']:
+                self.get_logger().warn(msg + f', below w_min {self.p["w_min"]:.2f}: the robot may not '
+                                       'turn that slowly -> using w_min (shorter exposure_ms helps)')
+            else:
+                self.get_logger().info(msg)
 
         # ROS interfaces
         self.cmd_pub = self.create_publisher(Twist, 'cmd_vel_auto', 10)
@@ -399,6 +422,10 @@ class TagMission(Node):
         if active:
             handler = getattr(self, 'step_' + self.state.lower())
             cmd = handler(obs, pose)
+            # sharp images: no faster than the blur limit, but never below a turn rate that
+            # was found necessary to move at all (w_turn_min grows when turns stall)
+            w_lim = max(self.w_blur, self.w_turn_min, self.p['w_min'])
+            cmd = (cmd[0], max(-w_lim, min(w_lim, cmd[1])))
         if active:
             self.out = (self.ramp(self.out[0], cmd[0], self.p['accel_linear']),
                         self.ramp(self.out[1], cmd[1], self.p['accel_angular']))

@@ -16,10 +16,15 @@ tag_mission:
     hfov_deg: 87.4            # UGREEN 2K (from focal_px); only used when focal_px = 0
     camera_offset: 0.15       # m, camera in front of the robot's turning centre
     camera_latency: 0.08      # s, frame age when it is processed
-    exposure_ms: 0.0          # 0 = auto exposure: normal bright image (the robot stops to look).
-                              # >0 = manual ms: sharper while turning but much darker
-                              # (5 ms gave an almost black image: brightness 7/255).
-    gain: -1.0                # camera gain (-1 = leave as is); e.g. 100-200 for dim rooms
+    # Sharp while turning: blur (px) = turn rate x exposure x focal. Auto exposure here is long
+    # (~60+ ms: bright but smeared), so: short exposure + max gain + digital brightening.
+    # Measured on the UGREEN 2K at 2560x1440 (mean brightness /255):
+    #   auto 153 | 5 ms gain 0: 11 | 5 ms gain 255: 73 | 8 ms gain 255: 108 (tags found in all)
+    exposure_ms: 5.0          # manual exposure ms (0 = auto: bright but blurred while turning)
+    gain: 255.0               # camera gain 0-255 (-1 = leave as is); put back when the node stops
+    brightness: 110.0         # digital gain lifts dark frames to this mean (0 = off), max x6
+    max_blur_px: 3.0          # turns limited to this blur: 3 / (5 ms x 1339 px) = 0.45 rad/s
+                              # (0 = off). Longer exposure -> slower turns.
     camera_controls: ""       # extra v4l2-ctl controls if OpenCV cannot set exposure, e.g.
                               # "auto_exposure=1,exposure_time_absolute=50"
 
